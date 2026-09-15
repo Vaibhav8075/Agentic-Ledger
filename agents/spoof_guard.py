@@ -1,0 +1,39 @@
+"""
+Child Worker 1: Soundbox Telemetry & Spoof Guard Agent
+SLA: Strictly under 600ms latency.
+Validates gateway hashes against MQTT QoS 1 telemetry.
+"""
+
+import time
+import httpx
+from typing import Any, Dict
+
+class SpoofGuardAgent:
+    def __init__(self, backend_url: str = "http://127.0.0.1:8000"):
+        self.backend_url = backend_url
+        self.name = "SpoofGuardWorker"
+        self.latency_budget_ms = 600
+
+    async def verify_transaction(self, txn_id: str, device_imei: str, timestamp_window: int = 60000) -> Dict[str, Any]:
+        """
+        Executes sub-600ms verification to eliminate Paytm Spoof app attacks
+        while distinguishing 2G cellular MQTT latency.
+        """
+        start = time.time()
+        url = f"{self.backend_url}/api/v1/telemetry/verify-packet"
+        payload = {
+            "txn_id": txn_id,
+            "device_imei": device_imei,
+            "timestamp_window": timestamp_window
+        }
+
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            resp = await client.post(url, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+
+        elapsed_ms = int((time.time() - start) * 1000)
+        data["agent_elapsed_ms"] = elapsed_ms
+        data["sla_met"] = elapsed_ms <= self.latency_budget_ms
+
+        return data
