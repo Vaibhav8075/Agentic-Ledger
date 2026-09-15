@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  backend:
+    build: .
+    container_name: paytm_mock_backend
+    ports:
+      - "8000:8000"
+    command: uvicorn mock_backend.main:app --host 0.0.0.0 --port 8000
+    volumes:
+      - .:/app
+
+  frontend:
+    build: .
+    container_name: paytm_streamlit_ui
+    ports:
+      - "8501:8501"
+    command: streamlit run streamlit_app.py --server.address=0.0.0.0
+    depends_on:
+      - backend
+    volumes:
+      - .:/app
