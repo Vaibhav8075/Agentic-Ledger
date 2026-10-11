@@ -4,6 +4,7 @@ import time
 from tests.conftest import MID, balance, settlement_body, signed_headers
 
 URL = "/api/v1/settlement/execute-micro"
+START = 6000.0  # seeded unsettled balance; EMI reserve is 3000
 
 
 def test_signed_request_settles_once(client):
@@ -11,7 +12,7 @@ def test_signed_request_settles_once(client):
     resp = client.post(URL, content=body, headers=signed_headers(body))
     assert resp.status_code == 200
     assert resp.json()["request"]["body"]["status"] == "TXN_SUCCESS"
-    assert balance() == 11500.0
+    assert balance() == START - 500.0
 
 
 def test_forged_or_missing_signature_is_rejected(client):
@@ -20,7 +21,7 @@ def test_forged_or_missing_signature_is_rejected(client):
     assert client.post(URL, content=body, headers=forged).status_code == 401
     unsigned = {"Content-Type": "application/json", "X-Idempotency-Key": "IDEMP_TEST_0001"}
     assert client.post(URL, content=body, headers=unsigned).status_code == 401
-    assert balance() == 12000.0
+    assert balance() == START
 
 
 def test_tampered_amount_and_stale_timestamp_are_rejected(client):
@@ -29,7 +30,7 @@ def test_tampered_amount_and_stale_timestamp_are_rejected(client):
     body = settlement_body(500.0)
     stale = signed_headers(body, timestamp=int(time.time()) - 3600)
     assert client.post(URL, content=body, headers=stale).status_code == 401
-    assert balance() == 12000.0
+    assert balance() == START
 
 
 def test_retry_with_same_key_does_not_double_debit(client):
@@ -38,7 +39,7 @@ def test_retry_with_same_key_does_not_double_debit(client):
     retry = client.post(URL, content=body, headers=signed_headers(body))
     assert first.status_code == retry.status_code == 200
     assert first.json() == retry.json()
-    assert balance() == 10000.0
+    assert balance() == START - 2000.0
 
 
 def test_reused_key_with_different_body_conflicts(client):
@@ -46,7 +47,7 @@ def test_reused_key_with_different_body_conflicts(client):
     client.post(URL, content=first, headers=signed_headers(first))
     other = settlement_body(700.0, order_id="ORD_TEST_0002")
     assert client.post(URL, content=other, headers=signed_headers(other)).status_code == 409
-    assert balance() == 11500.0
+    assert balance() == START - 500.0
 
 
 def test_guardrail_applies_on_timeout_path_too(client):
@@ -54,7 +55,7 @@ def test_guardrail_applies_on_timeout_path_too(client):
     body = settlement_body(1_000_000.0, simulate_504=True)
     resp = client.post(URL, content=body, headers=signed_headers(body))
     assert resp.status_code == 400
-    assert balance() == 12000.0
+    assert balance() == START
 
 
 def test_invalid_amount_rail_and_merchant(client):
@@ -70,14 +71,14 @@ def test_state_endpoint_hides_signing_key(client):
 
 
 def test_supervisor_recovers_from_timeout_without_second_payout(supervisor):
-    result = asyncio.run(supervisor.execute_settlement(MID, 4500.0, simulate_504=True))
+    result = asyncio.run(supervisor.execute_settlement(MID, 2000.0, simulate_504=True))
     assert result["recovered_after_timeout"] is True
     assert result["request"]["body"]["udir_reconciliation_code"] == "TCC102"
-    assert balance() == 7500.0
+    assert balance() == START - 2000.0
 
 
 def test_supervisor_retry_of_same_order_is_idempotent(supervisor):
     first = asyncio.run(supervisor.execute_settlement(MID, 1000.0, order_id="ORD_REPEAT_01"))
     again = asyncio.run(supervisor.execute_settlement(MID, 1000.0, order_id="ORD_REPEAT_01"))
     assert first["request"]["body"]["transactionId"] == again["request"]["body"]["transactionId"]
-    assert balance() == 11000.0
+    assert balance() == START - 1000.0
