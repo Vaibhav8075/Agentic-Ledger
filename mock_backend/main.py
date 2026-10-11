@@ -18,7 +18,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 import config
-from agents.guardrails import compute_signature, plan_supplier_payment
+from agents.guardrails import compute_signature, plan_supplier_payment, sanitize_pii
+from agents.invoice_parser import InvoiceParseError, parse_invoice
 from ml.forecaster import Forecaster
 
 app = FastAPI(
@@ -266,6 +267,12 @@ async def verify_packet(req: VerifyPacketRequest):
         p4b_action_triggered=None
     )
 
+@app.post("/api/v1/sandbox/reset")
+async def reset_sandbox():
+    """Sandbox only: restores the seeded merchant ledger and clears payments, orders and metrics."""
+    reset_state()
+    return {"status": "reset"}
+
 @app.post("/api/v1/sandbox/gateway/payments")
 async def create_sandbox_payment(req: SandboxPaymentRequest):
     """Sandbox only: records a genuine customer payment on the mock gateway, as if it just cleared."""
@@ -467,45 +474,25 @@ async def get_settlement_status(order_id: str):
 # ENDPOINT 4: SUPPLIER BILL PARSER (WORKER 2 SIMULATION)
 # -------------------------------------------------------------
 class ParseBillRequest(BaseModel):
-    raw_message: str
+    raw_message: str = Field(min_length=1, max_length=5000)
     vendor_id: str
 
 @app.post("/api/v1/supplier-bills/parse")
 async def parse_supplier_bill(req: ParseBillRequest):
     """
-    Multimodal invoice parsing with PII sanitization for WhatsApp/SMS vendor delivery notes.
+    Extracts a structured payment obligation from a WhatsApp/SMS supplier message.
+    PII should already be masked by the agent; anything still found here counts as a leak
+    and is masked before parsing.
     """
-    raw_text = req.raw_message
-    # Mask PII if any account numbers or PANs present
-    import re
-    cleaned_text = re.sub(r'\b\d{9,18}\b', '[REDACTED_ACC]', raw_text)
-    cleaned_text = re.sub(r'[A-Z]{5}[0-9]{4}[A-Z]{1}', '[REDACTED_PAN]', cleaned_text)
-    if cleaned_text != raw_text:
-        # The agent should have redacted this before sending it; count it as a leak
+    cleaned_text, leaked = sanitize_pii(req.raw_message)
+    if leaked:
         OBSERVABILITY_METRICS["pii_leakage_detected"] += 1
-
-    # Extract vendor and amount
-    extracted_amount = 4500.00
-    if "4500" in raw_text:
-        extracted_amount = 4500.00
-    elif "3200" in raw_text:
-        extracted_amount = 3200.00
-    elif "2450" in raw_text:
-        extracted_amount = 2450.50
-
-    return {
-        "vendor_id": req.vendor_id,
-        "vendor_name": "Amul Dairy Distributors Ltd.",
-        "invoice_number": "INV-2026-0910-AMUL",
-        "due_amount": extracted_amount,
-        "currency": "INR",
-        "cutoff_time": "2026-09-10T16:00:00+05:30",
-        "line_items": [
-            {"item": "Amul Taaza Milk Crates (12x1L)", "quantity": 5, "amount": 3500.00},
-            {"item": "Amul Masti Dahi Tubs", "quantity": 10, "amount": 1000.00}
-        ],
-        "pii_redacted": cleaned_text != raw_text
-    }
+    try:
+        bill = parse_invoice(cleaned_text, req.vendor_id)
+    except InvoiceParseError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    bill["pii_redacted"] = leaked
+    return bill
 
 # -------------------------------------------------------------
 # ENDPOINT 5: P4B PUSH NOTIFICATIONS & OBSERVABILITY METRICS
