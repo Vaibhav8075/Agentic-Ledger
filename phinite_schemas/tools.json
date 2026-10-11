@@ -27,7 +27,11 @@
             "description": "Optional. The amount shown on the customer's payment screen; a mismatch with the gateway record is flagged as a spoof."
           }
         },
-        "required": ["txn_id", "device_imei", "timestamp_window"],
+        "required": [
+          "txn_id",
+          "device_imei",
+          "timestamp_window"
+        ],
         "additionalProperties": false
       },
       "response": {
@@ -35,17 +39,40 @@
         "properties": {
           "status": {
             "type": "string",
-            "enum": ["VERIFIED_DELIVERED", "AUDIO_DELAYED", "SPOOF_DETECTED", "PENDING_SWITCH"]
+            "enum": [
+              "VERIFIED_DELIVERED",
+              "AUDIO_DELAYED",
+              "SPOOF_DETECTED",
+              "PENDING_SWITCH"
+            ]
           },
-          "gateway_hash_matched": { "type": "boolean" },
-          "mqtt_publish_detected": { "type": "boolean" },
-          "puback_received": { "type": "boolean" },
-          "latency_ms": { "type": "integer" },
-          "deduplicated": { "type": "boolean" },
-          "message": { "type": "string" },
-          "p4b_action_triggered": { "type": "string" }
+          "gateway_hash_matched": {
+            "type": "boolean"
+          },
+          "mqtt_publish_detected": {
+            "type": "boolean"
+          },
+          "puback_received": {
+            "type": "boolean"
+          },
+          "latency_ms": {
+            "type": "integer"
+          },
+          "deduplicated": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          },
+          "p4b_action_triggered": {
+            "type": "string"
+          }
         },
-        "required": ["status", "gateway_hash_matched", "latency_ms"]
+        "required": [
+          "status",
+          "gateway_hash_matched",
+          "latency_ms"
+        ]
       }
     },
     {
@@ -63,72 +90,161 @@
             "description": "The recognized GSTIN or VPA (Virtual Payment Address) of the distributor."
           }
         },
-        "required": ["raw_message", "vendor_id"],
+        "required": [
+          "raw_message",
+          "vendor_id"
+        ],
         "additionalProperties": false
       },
       "response": {
         "type": "object",
         "properties": {
-          "vendor_id": { "type": "string" },
-          "vendor_name": { "type": "string" },
-          "invoice_number": { "type": "string" },
-          "due_amount": { "type": "number" },
-          "cutoff_time": { "type": "string" },
-          "currency": { "type": "string" },
+          "vendor_id": {
+            "type": "string"
+          },
+          "vendor_name": {
+            "type": "string"
+          },
+          "invoice_number": {
+            "type": "string"
+          },
+          "due_amount": {
+            "type": "number"
+          },
+          "cutoff_time": {
+            "type": "string"
+          },
+          "currency": {
+            "type": "string"
+          },
           "line_items": {
             "type": "array",
             "items": {
               "type": "object",
               "properties": {
-                "item": { "type": "string" },
-                "quantity": { "type": "integer" },
-                "amount": { "type": "number" }
+                "item": {
+                  "type": "string"
+                },
+                "quantity": {
+                  "type": "integer"
+                },
+                "amount": {
+                  "type": "number"
+                }
               }
             }
           },
-          "pii_redacted": { "type": "boolean" }
+          "pii_redacted": {
+            "type": "boolean"
+          }
         },
-        "required": ["vendor_id", "due_amount", "cutoff_time", "pii_redacted"]
+        "required": [
+          "vendor_id",
+          "due_amount",
+          "cutoff_time",
+          "pii_redacted"
+        ]
       }
     },
     {
       "name": "simulate_cashflow_trajectory",
-      "description": "Calculates the impact of a targeted micro-settlement against the merchant's daily loan EMI deductions and projects the End-of-Day T+1 batch balance.",
+      "description": "Plans an EMI-safe payment of a supplier bill from the merchant's ledger: pay from the unsettled balance above the EMI reserve, offer a capped advance for a gap covered by the conservative forecast floor of tonight's sales, otherwise pay what is safe and leave the rest unpaid.",
       "parameters": {
         "type": "object",
         "properties": {
-          "current_unsettled_balance": {
-            "type": "number",
-            "description": "The current cumulative fiat total of unsettled batch transactions."
+          "merchant_id": {
+            "type": "string",
+            "description": "Paytm Merchant ID (MID). The balance and EMI are read from its ledger."
           },
           "due_amount": {
             "type": "number",
-            "description": "The exact fiat amount requested by the FMCG distributor for immediate payout."
+            "exclusiveMinimum": 0,
+            "description": "Bill amount to pay the supplier."
           },
           "cutoff_time": {
             "type": "string",
-            "description": "The ISO 8601 formatted timestamp indicating when the supplier payment is required."
+            "description": "Optional ISO 8601 time by which the supplier must be paid."
+          },
+          "vendor_id": {
+            "type": "string",
+            "description": "Supplier VPA or GSTIN, used in the notification and deep link."
           }
         },
-        "required": ["current_unsettled_balance", "due_amount", "cutoff_time"],
+        "required": [
+          "merchant_id",
+          "due_amount"
+        ],
         "additionalProperties": false
       },
       "response": {
         "type": "object",
         "properties": {
-          "merchant_id": { "type": "string" },
-          "current_unsettled_balance": { "type": "number" },
-          "requested_settlement": { "type": "number" },
-          "daily_loan_emi": { "type": "number" },
-          "assertion_passed": { "type": "boolean" },
-          "projected_eod_balance": { "type": "number" },
-          "recommended_micro_settlement": { "type": "number" },
-          "instant_fee": { "type": "number" },
-          "avoided_penalty_fees": { "type": "number" },
-          "action_deep_link": { "type": "string" },
-          "p4b_notification_payload": { "type": "object" }
+          "merchant_id": {
+            "type": "string"
+          },
+          "current_unsettled_balance": {
+            "type": "number"
+          },
+          "requested_settlement": {
+            "type": "number"
+          },
+          "daily_loan_emi": {
+            "type": "number"
+          },
+          "advance_limit": {
+            "type": "number"
+          },
+          "assertion_passed": {
+            "type": "boolean",
+            "description": "Strict check without any forecast: due + EMI <= balance."
+          },
+          "decision": {
+            "type": "string",
+            "enum": [
+              "PAY_FROM_BALANCE",
+              "PAY_WITH_ADVANCE",
+              "PARTIAL_PAYMENT"
+            ]
+          },
+          "safe_settlement_limit": {
+            "type": "number"
+          },
+          "recommended_micro_settlement": {
+            "type": "number"
+          },
+          "advance_amount": {
+            "type": "number"
+          },
+          "unpaid_amount": {
+            "type": "number"
+          },
+          "evening_forecast_expected": {
+            "type": "number"
+          },
+          "evening_forecast_floor": {
+            "type": "number"
+          },
+          "projected_eod_balance": {
+            "type": "number"
+          },
+          "instant_fee": {
+            "type": "number"
+          },
+          "action_deep_link": {
+            "type": "string"
+          },
+          "p4b_notification_payload": {
+            "type": "object"
+          }
         },
-        "required": ["assertion_passed", "recommended_micro_settlement", "projected_eod_balance", "action_deep_link"]
+        "required": [
+          "decision",
+          "recommended_micro_settlement",
+          "advance_amount",
+          "unpaid_amount",
+          "projected_eod_balance",
+          "action_deep_link"
+        ]
       }
     },
     {
@@ -143,15 +259,29 @@
           },
           "required_amount": {
             "type": "number",
-            "description": "The exact fiat amount to be settled to the merchant's linked account, leaving the residual balance intact."
+            "description": "The exact fiat amount to be settled to the merchant's linked account, leaving the residual balance intact.",
+            "exclusiveMinimum": 0
           },
           "routing_rail": {
             "type": "string",
-            "enum": ["IMPS", "UPI", "NEFT"],
+            "enum": [
+              "IMPS",
+              "UPI",
+              "NEFT"
+            ],
             "description": "The underlying banking rail to be used for the instant payout."
+          },
+          "order_id": {
+            "type": "string",
+            "description": "Caller-generated order ID, reused unchanged on every retry (idempotency)."
           }
         },
-        "required": ["merchant_id", "required_amount", "routing_rail"],
+        "required": [
+          "merchant_id",
+          "required_amount",
+          "routing_rail",
+          "order_id"
+        ],
         "additionalProperties": false
       },
       "response": {
@@ -159,18 +289,43 @@
         "properties": {
           "status": {
             "type": "string",
-            "enum": ["TXN_SUCCESS", "TXN_PENDING_RECONCILIATION", "TXN_FAILED"]
+            "enum": [
+              "TXN_SUCCESS",
+              "TXN_PENDING_RECONCILIATION",
+              "TXN_FAILED"
+            ]
           },
-          "transaction_id": { "type": "string" },
-          "order_id": { "type": "string" },
-          "amount": { "type": "number" },
-          "utr_no": { "type": "string" },
-          "settled_date": { "type": "string" },
-          "hmac_signature_verified": { "type": "boolean" },
-          "remaining_ledger_balance": { "type": "number" },
-          "routing_rail": { "type": "string" }
+          "transaction_id": {
+            "type": "string"
+          },
+          "order_id": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "number"
+          },
+          "utr_no": {
+            "type": "string"
+          },
+          "settled_date": {
+            "type": "string"
+          },
+          "hmac_signature_verified": {
+            "type": "boolean"
+          },
+          "remaining_ledger_balance": {
+            "type": "number"
+          },
+          "routing_rail": {
+            "type": "string"
+          }
         },
-        "required": ["status", "transaction_id", "amount", "hmac_signature_verified"]
+        "required": [
+          "status",
+          "transaction_id",
+          "amount",
+          "hmac_signature_verified"
+        ]
       }
     }
   ]
