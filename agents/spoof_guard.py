@@ -6,13 +6,14 @@ Validates gateway hashes against MQTT QoS 1 telemetry.
 
 import time
 import httpx
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import config
 
 class SpoofGuardAgent:
-    def __init__(self, backend_url: str = config.BACKEND_URL):
+    def __init__(self, backend_url: str = config.BACKEND_URL, transport: Optional[httpx.AsyncBaseTransport] = None):
         self.backend_url = backend_url
+        self.transport = transport  # injectable for tests
         self.name = "SpoofGuardWorker"
         self.latency_budget_ms = 600
 
@@ -29,7 +30,7 @@ class SpoofGuardAgent:
             "timestamp_window": timestamp_window
         }
 
-        async with httpx.AsyncClient(timeout=2.0) as client:
+        async with httpx.AsyncClient(timeout=2.0, transport=self.transport) as client:
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
             data = resp.json()
