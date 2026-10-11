@@ -6,7 +6,9 @@ Runs natively using Python's standard library unittest.
 import unittest
 import httpx
 
-BACKEND_URL = "http://127.0.0.1:8000"
+import config
+
+BACKEND_URL = config.BACKEND_URL
 
 class TestPaytmVyaparSaathi(unittest.TestCase):
     @classmethod
