@@ -62,11 +62,18 @@ def assert_liquidity_guardrail(
         "action": "PROCEED_WITH_TARGETED_MICRO_SETTLEMENT"
     }
 
-def sign_paytm_request(payload: dict, secret_key: str) -> Dict[str, str]:
+def canonical_body(payload: dict) -> bytes:
+    """Serialises a request body the same way on both sides so signatures are reproducible."""
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+def compute_signature(body: bytes, secret_key: str, timestamp: str) -> str:
+    """HMAC-SHA256 over the exact request bytes followed by the timestamp."""
+    return hmac.new(secret_key.encode("utf-8"), body + timestamp.encode("utf-8"), hashlib.sha256).hexdigest()
+
+def sign_paytm_request(body: bytes, secret_key: str) -> Dict[str, str]:
     """
-    Generates cryptographic HMAC-SHA256 signature for Paytm API communication.
+    Signs the exact bytes that will be sent. The receiver recomputes the signature from the raw
+    body and the X-Paytm-Timestamp header, so any change to the amount or merchant breaks it.
     """
     timestamp = str(int(time.time()))
-    raw_str = json.dumps(payload, sort_keys=True) + timestamp
-    signature = hmac.new(secret_key.encode('utf-8'), raw_str.encode('utf-8'), hashlib.sha256).hexdigest()
-    return {"signature": signature, "timestamp": timestamp}
+    return {"signature": compute_signature(body, secret_key, timestamp), "timestamp": timestamp}

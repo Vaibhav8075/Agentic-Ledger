@@ -4,6 +4,8 @@ Coordinates child workers, maintains merchant session state,
 and executes cryptographically signed Paytm settlement actions.
 """
 
+import asyncio
+import uuid
 import httpx
 from typing import Any, Dict, Optional
 
@@ -11,17 +13,18 @@ import config
 from agents.spoof_guard import SpoofGuardAgent
 from agents.supplier_ledger import SupplierLedgerAgent
 from agents.liquidity_engine import LiquidityEngineAgent
-from agents.guardrails import sign_paytm_request
+from agents.guardrails import canonical_body, sign_paytm_request
 
 class MasterSupervisorAgent:
-    def __init__(self, backend_url: str = config.BACKEND_URL):
+    def __init__(self, backend_url: str = config.BACKEND_URL, transport: Optional[httpx.AsyncBaseTransport] = None):
         self.backend_url = backend_url
+        self.transport = transport
         self.name = "MasterSupervisorOrchestrator"
 
         # Initialize Child Workers
-        self.spoof_guard = SpoofGuardAgent(backend_url)
-        self.supplier_ledger = SupplierLedgerAgent(backend_url)
-        self.liquidity_engine = LiquidityEngineAgent(backend_url)
+        self.spoof_guard = SpoofGuardAgent(backend_url, transport)
+        self.supplier_ledger = SupplierLedgerAgent(backend_url, transport)
+        self.liquidity_engine = LiquidityEngineAgent(backend_url, transport)
 
     async def handle_soundbox_event(self, txn_id: str, device_imei: str) -> Dict[str, Any]:
         """
@@ -57,28 +60,47 @@ class MasterSupervisorAgent:
         merchant_id: str,
         required_amount: float,
         routing_rail: str = "IMPS",
-        simulate_504: bool = False
+        order_id: Optional[str] = None,
+        simulate_504: bool = False,
+        status_checks: int = 3
     ) -> Dict[str, Any]:
         """
-        Executes instant micro-settlement against the mock Paytm Settlement API
-        using HMAC-SHA256 signature and handling 504 timeout recovery.
+        Executes an instant micro-settlement with a signed request.
+        One order ID and one idempotency key are fixed up front and reused for every retry,
+        so a timeout can never turn into a second payout.
         """
-        url = f"{self.backend_url}/api/v1/settlement/execute-micro"
-        payload = {
+        order_id = order_id or f"ORD_{uuid.uuid4().hex[:16].upper()}"
+        idempotency_key = f"IDEMP_{order_id}"
+        body = canonical_body({
             "merchant_id": merchant_id,
-            "required_amount": required_amount,
+            "order_id": order_id,
+            "required_amount": round(float(required_amount), 2),
             "routing_rail": routing_rail,
             "simulate_504": simulate_504
-        }
+        })
 
-        # Generate HMAC-SHA256 signature
-        auth_head = sign_paytm_request(payload, config.MERCHANT_SIGNING_KEY)
-        headers = {
-            "X-Paytm-Signature": auth_head["signature"],
-            "X-Idempotency-Key": f"IDEMP_MICRO_{int(auth_head['timestamp'])}"
-        }
-
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(url, json=payload, headers=headers)
+        async with httpx.AsyncClient(base_url=self.backend_url, timeout=5.0, transport=self.transport) as client:
+            resp = await self._post_signed(client, body, idempotency_key)
+            if resp.status_code == 504:
+                # Never fire a fresh payout after a timeout: first ask the switch what happened.
+                for attempt in range(status_checks):
+                    status = await client.get(f"/api/v1/settlement/status/{order_id}")
+                    if status.status_code == 200:
+                        result = status.json()
+                        result["recovered_after_timeout"] = True
+                        return result
+                    await asyncio.sleep(0.2 * (attempt + 1))
+                # The order never reached the bank, so a retry with the same key is safe.
+                resp = await self._post_signed(client, body, idempotency_key)
             resp.raise_for_status()
             return resp.json()
+
+    async def _post_signed(self, client: httpx.AsyncClient, body: bytes, idempotency_key: str) -> httpx.Response:
+        auth = sign_paytm_request(body, config.MERCHANT_SIGNING_KEY)
+        headers = {
+            "Content-Type": "application/json",
+            "X-Paytm-Signature": auth["signature"],
+            "X-Paytm-Timestamp": auth["timestamp"],
+            "X-Idempotency-Key": idempotency_key
+        }
+        return await client.post("/api/v1/settlement/execute-micro", content=body, headers=headers)

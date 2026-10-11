@@ -5,14 +5,15 @@ Enforces deterministic balance calculation and Maker-Checker guardrail:
 """
 
 import httpx
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import config
 from agents.guardrails import assert_liquidity_guardrail
 
 class LiquidityEngineAgent:
-    def __init__(self, backend_url: str = config.BACKEND_URL):
+    def __init__(self, backend_url: str = config.BACKEND_URL, transport: Optional[httpx.AsyncBaseTransport] = None):
         self.backend_url = backend_url
+        self.transport = transport  # injectable for tests
         self.name = "LiquidityEngineWorker"
 
     async def simulate_cashflow(
@@ -34,7 +35,7 @@ class LiquidityEngineAgent:
             "merchant_id": merchant_id
         }
 
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=15.0, transport=self.transport) as client:
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
             data = resp.json()

@@ -5,14 +5,15 @@ and extracts structured debt obligations into JSON.
 """
 
 import httpx
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import config
 from agents.guardrails import sanitize_pii
 
 class SupplierLedgerAgent:
-    def __init__(self, backend_url: str = config.BACKEND_URL):
+    def __init__(self, backend_url: str = config.BACKEND_URL, transport: Optional[httpx.AsyncBaseTransport] = None):
         self.backend_url = backend_url
+        self.transport = transport  # injectable for tests
         self.name = "SupplierLedgerWorker"
 
     async def parse_invoice(self, raw_message: str, vendor_id: str = "amul_distributor_vpa") -> Dict[str, Any]:
@@ -27,7 +28,7 @@ class SupplierLedgerAgent:
             "vendor_id": vendor_id
         }
 
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(timeout=5.0, transport=self.transport) as client:
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
             data = resp.json()

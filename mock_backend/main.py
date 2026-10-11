@@ -10,12 +10,14 @@ import json
 import time
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from fastapi import FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 import config
+from agents.guardrails import compute_signature
 
 app = FastAPI(
     title="Paytm Vyapar Saathi Production Mock Backend",
@@ -34,62 +36,78 @@ app.add_middleware(
 # -------------------------------------------------------------
 # IN-MEMORY FINTECH STATE & LEDGER STORE
 # -------------------------------------------------------------
-MERCHANT_DATABASE = {
-    "HelloM8xxxxxxxx45": {
-        "mid": "HelloM8xxxxxxxx45",
-        "merchant_name": "Sharma General Store & Dairy",
-        "secret_key": config.MERCHANT_SIGNING_KEY,
-        "device_imei": "864201938472910",
-        "current_unsettled_balance": 12000.00,
-        "daily_loan_emi": 3000.00,
-        "settled_today": 0.00,
-        "loan_account_id": "PAYTM_LOAN_782194",
-        "bank_account_masked": "XXXXXX9182",
-        "ifsc_masked": "PYTM0123456"
+def _seed_merchants() -> Dict[str, Dict[str, Any]]:
+    return {
+        config.DEMO_MERCHANT_ID: {
+            "mid": config.DEMO_MERCHANT_ID,
+            "merchant_name": "Sharma General Store & Dairy",
+            "secret_key": config.MERCHANT_SIGNING_KEY,
+            "device_imei": "864201938472910",
+            "current_unsettled_balance": 12000.00,
+            "daily_loan_emi": 3000.00,
+            "settled_today": 0.00,
+            "loan_account_id": "PAYTM_LOAN_782194",
+            "bank_account_masked": "XXXXXX9182",
+            "ifsc_masked": "PYTM0123456"
+        }
     }
-}
 
-# Transaction Hash Cache (Legitimate transactions cleared through Gateway Switch)
-KNOWN_GATEWAY_HASHES = {
-    "TXN_9876543210": {
-        "txn_id": "TXN_9876543210",
-        "rrn": "321456987012",
-        "amount": 50.00,
-        "timestamp": int(time.time()),
-        "status": "SUCCESS",
-        "device_imei": "864201938472910",
-        "mqtt_status": "QOS1_PUBACK_DELAYED", # Simulated 2G cellular network congestion
-        "mqtt_publish_sent": True,
-        "puback_received": False
-    },
-    "TXN_1122334455": {
-        "txn_id": "TXN_1122334455",
-        "rrn": "456789123045",
-        "amount": 250.00,
-        "timestamp": int(time.time()),
-        "status": "SUCCESS",
-        "device_imei": "864201938472910",
-        "mqtt_status": "DELIVERED",
-        "mqtt_publish_sent": True,
-        "puback_received": True
+def _seed_gateway_hashes() -> Dict[str, Dict[str, Any]]:
+    # Legitimate transactions cleared through the gateway switch
+    return {
+        "TXN_9876543210": {
+            "txn_id": "TXN_9876543210",
+            "rrn": "321456987012",
+            "amount": 50.00,
+            "timestamp": int(time.time()),
+            "status": "SUCCESS",
+            "device_imei": "864201938472910",
+            "mqtt_status": "QOS1_PUBACK_DELAYED", # Simulated 2G cellular network congestion
+            "mqtt_publish_sent": True,
+            "puback_received": False
+        },
+        "TXN_1122334455": {
+            "txn_id": "TXN_1122334455",
+            "rrn": "456789123045",
+            "amount": 250.00,
+            "timestamp": int(time.time()),
+            "status": "SUCCESS",
+            "device_imei": "864201938472910",
+            "mqtt_status": "DELIVERED",
+            "mqtt_publish_sent": True,
+            "puback_received": True
+        }
     }
-}
 
+def _fresh_metrics() -> Dict[str, Any]:
+    return {
+        "telemetry_verifications_count": 0,
+        "spoofs_detected_count": 0,
+        "lagged_audio_alerts_count": 0,
+        "liquidity_simulations_count": 0,
+        "loan_defaults_prevented_count": 0,
+        "total_settled_amount": 0.0,
+        "pii_leakage_detected": 0,
+        "math_hallucinations_detected": 0,
+        "latency_records_ms": []
+    }
+
+MERCHANT_DATABASE: Dict[str, Dict[str, Any]] = _seed_merchants()
+KNOWN_GATEWAY_HASHES: Dict[str, Dict[str, Any]] = _seed_gateway_hashes()
 P4B_NOTIFICATION_STORE: List[Dict[str, Any]] = []
-SETTLEMENT_ORDERS_STORE: Dict[str, Dict[str, Any]] = []
+SETTLEMENT_ORDERS_STORE: Dict[str, Dict[str, Any]] = {}
 PROCESSED_IDEMPOTENCY_KEYS: Dict[str, Dict[str, Any]] = {}
+OBSERVABILITY_METRICS: Dict[str, Any] = _fresh_metrics()
 
-OBSERVABILITY_METRICS = {
-    "telemetry_verifications_count": 0,
-    "spoofs_detected_count": 0,
-    "lagged_audio_alerts_count": 0,
-    "liquidity_simulations_count": 0,
-    "loan_defaults_prevented_count": 0,
-    "total_settled_amount": 0.0,
-    "pii_leakage_detected": 0,
-    "math_hallucinations_detected": 0,
-    "latency_records_ms": []
-}
+def reset_state() -> None:
+    """Restores the seeded sandbox state in place (used by tests and the demo)."""
+    for store, fresh in ((MERCHANT_DATABASE, _seed_merchants()), (KNOWN_GATEWAY_HASHES, _seed_gateway_hashes()),
+                         (OBSERVABILITY_METRICS, _fresh_metrics())):
+        store.clear()
+        store.update(fresh)
+    P4B_NOTIFICATION_STORE.clear()
+    SETTLEMENT_ORDERS_STORE.clear()
+    PROCESSED_IDEMPOTENCY_KEYS.clear()
 
 # -------------------------------------------------------------
 # DATA MODELS
@@ -130,21 +148,29 @@ class LiquiditySimulateResponse(BaseModel):
 
 class ExecuteMicroSettlementRequest(BaseModel):
     merchant_id: str
-    required_amount: float
-    routing_rail: str
-    order_id: Optional[str] = None
-    simulate_504: Optional[bool] = False
+    required_amount: float = Field(gt=0)
+    routing_rail: Literal["IMPS", "UPI", "NEFT"]
+    order_id: str = Field(min_length=6, max_length=64)
+    simulate_504: bool = False
 
 # -------------------------------------------------------------
 # HELPER FUNCTIONS: CHECKSUM & SECURITY
 # -------------------------------------------------------------
-def compute_paytm_checksum(payload_dict: dict, secret_key: str, timestamp: str) -> str:
-    raw_str = json.dumps(payload_dict, sort_keys=True) + timestamp
-    return hmac.new(secret_key.encode('utf-8'), raw_str.encode('utf-8'), hashlib.sha256).hexdigest()
+SIGNATURE_MAX_AGE_S = 300
 
-def verify_paytm_checksum(payload_dict: dict, secret_key: str, signature: str, timestamp: str) -> bool:
-    expected = compute_paytm_checksum(payload_dict, secret_key, timestamp)
-    return hmac.compare_digest(expected, signature)
+def compute_paytm_checksum(payload_dict: dict, secret_key: str, timestamp: str) -> str:
+    """Signs a response body so the caller can check it came from this gateway."""
+    raw = json.dumps(payload_dict, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return compute_signature(raw, secret_key, timestamp)
+
+def verify_request_signature(raw_body: bytes, secret_key: str, signature: Optional[str], timestamp: Optional[str]) -> None:
+    """Rejects unsigned, tampered or replayed (stale) requests."""
+    if not signature or not timestamp or not timestamp.isdigit():
+        raise HTTPException(status_code=401, detail="Missing X-Paytm-Signature or X-Paytm-Timestamp header.")
+    if abs(time.time() - int(timestamp)) > SIGNATURE_MAX_AGE_S:
+        raise HTTPException(status_code=401, detail="Signature timestamp outside the allowed window.")
+    if not hmac.compare_digest(compute_signature(raw_body, secret_key, timestamp), signature):
+        raise HTTPException(status_code=401, detail="Invalid request signature.")
 
 # -------------------------------------------------------------
 # ENDPOINT 1: SOUNDBOX TELEMETRY & SPOOF VERIFICATION
@@ -364,97 +390,69 @@ async def simulate_liquidity(req: LiquiditySimulateRequest):
 @app.post("/api/v1/settlement/execute-micro")
 async def execute_micro_settlement(
     req: ExecuteMicroSettlementRequest,
+    request: Request,
     x_paytm_signature: Optional[str] = Header(None),
-    x_idempotency_key: Optional[str] = Header(None)
+    x_paytm_timestamp: Optional[str] = Header(None),
+    x_idempotency_key: str = Header(..., min_length=8)
 ):
     """
-    Executes instant payout with HMAC-SHA256 signature verification and handles 504 Gateway Timeouts.
+    Executes an instant payout. The request must be signed (HMAC-SHA256 over the raw body and
+    timestamp) and carry an idempotency key that the caller reuses on every retry of the same order.
+    The EMI guardrail is enforced before any money moves, on every path.
     """
     merchant = MERCHANT_DATABASE.get(req.merchant_id)
     if not merchant:
         raise HTTPException(status_code=404, detail="Merchant MID not found.")
 
-    order_id = req.order_id or f"ORDER_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:6].upper()}"
-    idempotency_key = x_idempotency_key or f"IDEMP_{order_id}"
+    raw_body = await request.body()
+    verify_request_signature(raw_body, merchant["secret_key"], x_paytm_signature, x_paytm_timestamp)
 
-    # 1. Idempotency Check: Prevent Double Debit
-    if idempotency_key in PROCESSED_IDEMPOTENCY_KEYS:
-        return PROCESSED_IDEMPOTENCY_KEYS[idempotency_key]
+    # 1. Idempotency: a retry with the same key returns the original outcome and never debits twice
+    fingerprint = hashlib.sha256(raw_body).hexdigest()
+    previous = PROCESSED_IDEMPOTENCY_KEYS.get(x_idempotency_key)
+    if previous:
+        if previous["fingerprint"] != fingerprint:
+            raise HTTPException(status_code=409, detail="Idempotency key already used for a different request.")
+        return previous["response"]
+    if req.order_id in SETTLEMENT_ORDERS_STORE:
+        raise HTTPException(status_code=409, detail="Order ID already exists; reuse its idempotency key to retry.")
 
-    # 2. Cryptographic Checksum Generation & Verification
-    timestamp = str(int(time.time()))
-    payload_body = {
-        "mid": merchant["mid"],
-        "orderId": order_id,
-        "amount": f"{req.required_amount:.2f}",
-        "routingRail": req.routing_rail
-    }
-    server_generated_signature = compute_paytm_checksum(payload_body, merchant["secret_key"], timestamp)
-
-    # 3. Simulate 504 Bank Switch Gateway Timeout & Auto-UDIR Recovery
-    if req.simulate_504:
-        # Bank Core Banking System timed out. Avoid retry to protect against double debits!
-        # Automatically poll NPCI UDIR for code TCC102/TCC103
-        reconciled_utr = f"218{int(time.time())}04"
-        recovery_response = {
-            "request": {
-                "head": {
-                    "reqMsgId": str(uuid.uuid4()),
-                    "signature": server_generated_signature,
-                    "timestamp": timestamp
-                },
-                "body": {
-                    "mid": merchant["mid"],
-                    "transactionId": f"TXN_{uuid.uuid4().hex[:12].upper()}",
-                    "orderId": order_id,
-                    "amount": f"{req.required_amount:.2f}",
-                    "status": "TXN_SUCCESS",
-                    "settledDate": datetime.now().isoformat(),
-                    "utrNo": reconciled_utr,
-                    "routingRail": req.routing_rail,
-                    "udir_reconciliation_code": "TCC102",
-                    "note": "Recovered via NPCI UDIR polling post-504 CBS timeout. Zero double-debit."
-                }
-            }
-        }
-        # Deduct from unsettled ledger
-        merchant["current_unsettled_balance"] -= req.required_amount
-        merchant["settled_today"] += req.required_amount
-        OBSERVABILITY_METRICS["total_settled_amount"] += req.required_amount
-        PROCESSED_IDEMPOTENCY_KEYS[idempotency_key] = recovery_response
-        return recovery_response
-
-    # 4. Standard Instant Payout
+    # 2. Liquidity guardrail on every path, including the simulated timeout
     if merchant["current_unsettled_balance"] - req.required_amount < merchant["daily_loan_emi"]:
         raise HTTPException(
             status_code=400,
             detail=f"Settlement blocked by Liquidity Guardrail: balance would breach ₹{merchant['daily_loan_emi']} EMI float."
         )
 
+    # 3. Move the money exactly once
     merchant["current_unsettled_balance"] -= req.required_amount
     merchant["settled_today"] += req.required_amount
     OBSERVABILITY_METRICS["total_settled_amount"] += req.required_amount
 
-    txn_id = f"202{int(time.time())}{uuid.uuid4().hex[:6].upper()}"
-    utr_no = f"218{int(time.time())}04"
-
+    timestamp = str(int(time.time()))
+    body = {
+        "mid": merchant["mid"],
+        "transactionId": f"TXN_{uuid.uuid4().hex[:12].upper()}",
+        "orderId": req.order_id,
+        "amount": f"{req.required_amount:.2f}",
+        "status": "TXN_SUCCESS",
+        "settledDate": datetime.now().isoformat(),
+        "utrNo": f"218{int(time.time())}{uuid.uuid4().hex[:4].upper()}",
+        "routingRail": req.routing_rail,
+        "hmac_signature_verified": True
+    }
+    if req.simulate_504:
+        # The bank credited the beneficiary, but the response is lost: NPCI UDIR later reports TCC102.
+        body["udir_reconciliation_code"] = "TCC102"
+        body["note"] = "Beneficiary credited after a CBS timeout; confirmed through the order status check."
     response_payload = {
         "request": {
             "head": {
                 "reqMsgId": str(uuid.uuid4()),
-                "signature": server_generated_signature,
+                "signature": compute_paytm_checksum(body, merchant["secret_key"], timestamp),
                 "timestamp": timestamp
             },
-            "body": {
-                "mid": merchant["mid"],
-                "transactionId": txn_id,
-                "orderId": order_id,
-                "amount": f"{req.required_amount:.2f}",
-                "status": "TXN_SUCCESS",
-                "settledDate": datetime.now().isoformat(),
-                "utrNo": utr_no,
-                "routingRail": req.routing_rail
-            }
+            "body": body
         },
         "merchant_ledger": {
             "remaining_unsettled_balance": merchant["current_unsettled_balance"],
@@ -462,9 +460,23 @@ async def execute_micro_settlement(
             "loan_emi_status": "SECURED"
         }
     }
+    SETTLEMENT_ORDERS_STORE[req.order_id] = response_payload
+    PROCESSED_IDEMPOTENCY_KEYS[x_idempotency_key] = {"fingerprint": fingerprint, "response": response_payload}
 
-    PROCESSED_IDEMPOTENCY_KEYS[idempotency_key] = response_payload
+    if req.simulate_504:
+        return JSONResponse(status_code=504, content={"detail": "Upstream bank switch timed out. Check order status before retrying."})
     return response_payload
+
+@app.get("/api/v1/settlement/status/{order_id}")
+async def get_settlement_status(order_id: str):
+    """
+    Status check used after a timeout (the sandbox stand-in for an NPCI UDIR query).
+    404 means the order never reached the bank, so retrying with the same idempotency key is safe.
+    """
+    order = SETTLEMENT_ORDERS_STORE.get(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found at the bank switch.")
+    return order
 
 # -------------------------------------------------------------
 # ENDPOINT 4: SUPPLIER BILL PARSER (WORKER 2 SIMULATION)
@@ -547,4 +559,4 @@ async def get_merchant_state(merchant_id: str):
     merchant = MERCHANT_DATABASE.get(merchant_id)
     if not merchant:
         raise HTTPException(status_code=404, detail="Merchant not found.")
-    return merchant
+    return {k: v for k, v in merchant.items() if k != "secret_key"}
