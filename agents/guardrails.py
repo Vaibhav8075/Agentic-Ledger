@@ -10,7 +10,7 @@ import hmac
 import json
 import re
 import time
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 def sanitize_pii(text: str) -> Tuple[str, bool]:
     """
@@ -61,6 +61,63 @@ def assert_liquidity_guardrail(
         "residual_unsettled_balance": residual,
         "action": "PROCEED_WITH_TARGETED_MICRO_SETTLEMENT"
     }
+
+def plan_supplier_payment(
+    balance: float,
+    due_amount: float,
+    daily_loan_emi: float,
+    evening_floor: float,
+    advance_limit: float
+) -> Dict[str, Any]:
+    """
+    Deterministic payment plan for a supplier bill. Never touches the EMI reserve.
+    1. Pay from the unsettled balance if the bill fits above the EMI reserve.
+    2. Otherwise settle what is safe and offer a short advance for the gap, but only if the gap
+       is within both the pre-approved advance limit and the conservative forecast of tonight's
+       sales (which repay it in the T+1 batch, alongside the EMI).
+    3. Otherwise settle what is safe and leave the rest unpaid, with an advisory.
+    """
+    safe_now = round(max(0.0, balance - daily_loan_emi), 2)
+    if due_amount <= safe_now:
+        decision, settle_now, advance = "PAY_FROM_BALANCE", due_amount, 0.0
+    else:
+        shortfall = round(due_amount - safe_now, 2)
+        if shortfall <= min(evening_floor, advance_limit):
+            decision, settle_now, advance = "PAY_WITH_ADVANCE", safe_now, shortfall
+        else:
+            decision, settle_now, advance = "PARTIAL_PAYMENT", safe_now, 0.0
+    return {
+        "decision": decision,
+        "safe_settlement_limit": safe_now,
+        "settle_now_amount": round(settle_now, 2),
+        "advance_amount": round(advance, 2),
+        "unpaid_amount": round(due_amount - settle_now - advance, 2)
+    }
+
+def check_payment_plan(
+    plan: Dict[str, Any],
+    balance: float,
+    due_amount: float,
+    daily_loan_emi: float,
+    evening_floor: float,
+    advance_limit: float
+) -> List[str]:
+    """Checker side of maker-checker: returns every rule the plan breaks (empty list = safe)."""
+    eps = 0.01
+    settle, advance, unpaid = plan["settle_now_amount"], plan["advance_amount"], plan["unpaid_amount"]
+    violations = []
+    if min(settle, advance, unpaid) < -eps:
+        violations.append("negative amount in plan")
+    if settle > max(0.0, balance - daily_loan_emi) + eps:
+        violations.append("settlement eats into the EMI reserve")
+    if advance > min(evening_floor, advance_limit) + eps:
+        violations.append("advance exceeds the forecast floor or the advance limit")
+    if abs(settle + advance + unpaid - due_amount) > eps:
+        violations.append("plan does not add up to the bill")
+    expected = plan_supplier_payment(balance, due_amount, daily_loan_emi, evening_floor, advance_limit)
+    if plan["decision"] != expected["decision"]:
+        violations.append(f"decision {plan['decision']} differs from independent recomputation {expected['decision']}")
+    return violations
 
 def canonical_body(payload: dict) -> bytes:
     """Serialises a request body the same way on both sides so signatures are reproducible."""
