@@ -67,7 +67,6 @@ async def main():
     time.sleep(1)
 
     from agents.supervisor import MasterSupervisorAgent
-    from agents.guardrails import sanitize_pii, assert_liquidity_guardrail
 
     supervisor = MasterSupervisorAgent(backend_url=BACKEND_URL)
 
@@ -150,19 +149,21 @@ async def main():
     )
     print(f"{Fore.WHITE}Incoming WhatsApp Message:\n{Fore.BLUE}{raw_whatsapp_bill}\n")
 
-    # Step: PII Sanitization
-    sanitized_text, had_pii = sanitize_pii(raw_whatsapp_bill)
-    print(f"{Fore.GREEN}[OK] Phinite Pre-processing Guardrail Applied: PII Sanitization")
-    print(f"  * Sensitive Financial Data Masked: {Fore.CYAN}{had_pii}")
-    print(f"  * Sanitized Text sent to LLM:\n{Fore.LIGHTBLACK_EX}{sanitized_text}\n")
-
-    # Step: Worker 2 Invoice Parsing
-    print(f"{Fore.MAGENTA}Worker 2 (Supplier Ledger Agent) parsing debt obligation...")
-    parsed_invoice = await supervisor.handle_incoming_bill(raw_whatsapp_bill, vendor_id="amul_distributor_vpa")
-    print(f"  * Vendor: {Fore.WHITE}{parsed_invoice['vendor_name']}")
-    print(f"  * Extracted Due Amount: {Fore.GREEN}Rs. {parsed_invoice['due_amount']:,.2f}")
+    # The supervisor routes the bill: Supplier Ledger (PII redaction + extraction) -> Liquidity Engine
+    print(f"{Fore.MAGENTA}Supervisor routing the bill: Supplier Ledger Agent -> Liquidity Engine Agent...")
+    outcome = await supervisor.handle_event({
+        "type": "supplier_bill",
+        "raw_message": raw_whatsapp_bill,
+        "vendor_id": "amul_distributor_vpa"
+    })
+    parsed_invoice, sim_result = outcome["bill"], outcome["plan"]
+    print(f"{Fore.GREEN}[OK] PII redacted before the text left the agent: {parsed_invoice['pii_sanitized_at_ingress']}")
+    print(f"  * Text sent onward:\n{Fore.LIGHTBLACK_EX}{parsed_invoice['sanitized_text']}\n")
+    print(f"  * Vendor: {Fore.WHITE}{parsed_invoice['vendor_name']} ({parsed_invoice['invoice_number']})")
+    print(f"  * Extracted Due Amount: {Fore.GREEN}Rs. {parsed_invoice['due_amount']:,.2f} (checked against the message text)")
     print(f"  * Payment Cutoff: {Fore.WHITE}{parsed_invoice['cutoff_time']}")
-    print(f"  * Line Items Extracted: {Fore.WHITE}{len(parsed_invoice['line_items'])} items")
+    items = ", ".join(f"{i['quantity']} x {i['item']}" for i in parsed_invoice["line_items"])
+    print(f"  * Line Items: {Fore.WHITE}{items or 'none listed'}")
 
     print_step("SCENARIO 2B", "EMI-Safe Payment Plan (Ledger + PyTorch LSTM Floor)")
     async with httpx.AsyncClient() as client:
@@ -172,12 +173,7 @@ async def main():
     print(f"{Fore.WHITE}Bill to pay:                            {Fore.CYAN}Rs. {parsed_invoice['due_amount']:,.2f}")
     print(f"{Fore.RED}A full on-demand sweep would leave Rs. 0 and bounce tomorrow's EMI.")
 
-    print(f"\n{Fore.MAGENTA}Worker 3 (Liquidity Engine) planning the payment...")
-    sim_result = await supervisor.optimize_cashflow(
-        due_amount=parsed_invoice["due_amount"],
-        cutoff_time=parsed_invoice["cutoff_time"],
-        vendor_id="amul_distributor_vpa"
-    )
+    print(f"\n{Fore.MAGENTA}Worker 3 (Liquidity Engine) plan:")
     print(f"  * Safe to settle now (balance - EMI): {Fore.GREEN}Rs. {sim_result['safe_settlement_limit']:,.2f}")
     print(f"  * LSTM forecast of tonight's sales:   {Fore.WHITE}Rs. {sim_result['evening_forecast_expected']:,.2f} expected, "
           f"Rs. {sim_result['evening_forecast_floor']:,.2f} conservative floor")
