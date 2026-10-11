@@ -26,11 +26,11 @@ class MasterSupervisorAgent:
         self.supplier_ledger = SupplierLedgerAgent(backend_url, transport)
         self.liquidity_engine = LiquidityEngineAgent(backend_url, transport)
 
-    async def handle_soundbox_event(self, txn_id: str, device_imei: str) -> Dict[str, Any]:
+    async def handle_soundbox_event(self, txn_id: str, device_imei: str, claimed_amount: Optional[float] = None) -> Dict[str, Any]:
         """
         Dispatches to Worker 1 (Spoof Guard) for rapid verification.
         """
-        return await self.spoof_guard.verify_transaction(txn_id=txn_id, device_imei=device_imei)
+        return await self.spoof_guard.verify_transaction(txn_id=txn_id, device_imei=device_imei, claimed_amount=claimed_amount)
 
     async def handle_incoming_bill(self, raw_message: str, vendor_id: str) -> Dict[str, Any]:
         """

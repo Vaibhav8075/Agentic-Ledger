@@ -20,7 +20,11 @@
           },
           "timestamp_window": {
             "type": "integer",
-            "description": "The Unix epoch time window in milliseconds to scan for the transaction, allowing for 2G network buffering."
+            "description": "How far back, in milliseconds, a genuine payment may have cleared. Older receipts are treated as replays."
+          },
+          "claimed_amount": {
+            "type": "number",
+            "description": "Optional. The amount shown on the customer's payment screen; a mismatch with the gateway record is flagged as a spoof."
           }
         },
         "required": ["txn_id", "device_imei", "timestamp_window"],

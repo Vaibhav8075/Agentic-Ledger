@@ -52,33 +52,6 @@ def _seed_merchants() -> Dict[str, Dict[str, Any]]:
         }
     }
 
-def _seed_gateway_hashes() -> Dict[str, Dict[str, Any]]:
-    # Legitimate transactions cleared through the gateway switch
-    return {
-        "TXN_9876543210": {
-            "txn_id": "TXN_9876543210",
-            "rrn": "321456987012",
-            "amount": 50.00,
-            "timestamp": int(time.time()),
-            "status": "SUCCESS",
-            "device_imei": "864201938472910",
-            "mqtt_status": "QOS1_PUBACK_DELAYED", # Simulated 2G cellular network congestion
-            "mqtt_publish_sent": True,
-            "puback_received": False
-        },
-        "TXN_1122334455": {
-            "txn_id": "TXN_1122334455",
-            "rrn": "456789123045",
-            "amount": 250.00,
-            "timestamp": int(time.time()),
-            "status": "SUCCESS",
-            "device_imei": "864201938472910",
-            "mqtt_status": "DELIVERED",
-            "mqtt_publish_sent": True,
-            "puback_received": True
-        }
-    }
-
 def _fresh_metrics() -> Dict[str, Any]:
     return {
         "telemetry_verifications_count": 0,
@@ -87,13 +60,14 @@ def _fresh_metrics() -> Dict[str, Any]:
         "liquidity_simulations_count": 0,
         "loan_defaults_prevented_count": 0,
         "total_settled_amount": 0.0,
-        "pii_leakage_detected": 0,
-        "math_hallucinations_detected": 0,
+        "pii_leakage_detected": 0,  # PII that reached the backend unredacted
         "latency_records_ms": []
     }
 
 MERCHANT_DATABASE: Dict[str, Dict[str, Any]] = _seed_merchants()
-KNOWN_GATEWAY_HASHES: Dict[str, Dict[str, Any]] = _seed_gateway_hashes()
+# Transactions cleared through the gateway switch (created via /api/v1/sandbox/gateway/payments)
+KNOWN_GATEWAY_HASHES: Dict[str, Dict[str, Any]] = {}
+ANNOUNCED_TXNS: set = set()
 P4B_NOTIFICATION_STORE: List[Dict[str, Any]] = []
 SETTLEMENT_ORDERS_STORE: Dict[str, Dict[str, Any]] = {}
 PROCESSED_IDEMPOTENCY_KEYS: Dict[str, Dict[str, Any]] = {}
@@ -101,10 +75,11 @@ OBSERVABILITY_METRICS: Dict[str, Any] = _fresh_metrics()
 
 def reset_state() -> None:
     """Restores the seeded sandbox state in place (used by tests and the demo)."""
-    for store, fresh in ((MERCHANT_DATABASE, _seed_merchants()), (KNOWN_GATEWAY_HASHES, _seed_gateway_hashes()),
-                         (OBSERVABILITY_METRICS, _fresh_metrics())):
+    for store, fresh in ((MERCHANT_DATABASE, _seed_merchants()), (OBSERVABILITY_METRICS, _fresh_metrics())):
         store.clear()
         store.update(fresh)
+    KNOWN_GATEWAY_HASHES.clear()
+    ANNOUNCED_TXNS.clear()
     P4B_NOTIFICATION_STORE.clear()
     SETTLEMENT_ORDERS_STORE.clear()
     PROCESSED_IDEMPOTENCY_KEYS.clear()
@@ -115,7 +90,13 @@ def reset_state() -> None:
 class VerifyPacketRequest(BaseModel):
     txn_id: str
     device_imei: str
-    timestamp_window: int
+    timestamp_window: int = Field(gt=0, le=3_600_000, description="How far back (ms) a genuine payment may be")
+    claimed_amount: Optional[float] = Field(default=None, gt=0, description="Amount shown on the customer's screen")
+
+class SandboxPaymentRequest(BaseModel):
+    amount: float = Field(gt=0)
+    device_imei: str
+    mqtt_delivered: bool = Field(default=False, description="False simulates a dropped/delayed PUBACK on 2G")
 
 class VerifyPacketResponse(BaseModel):
     status: str
@@ -175,89 +156,123 @@ def verify_request_signature(raw_body: bytes, secret_key: str, signature: Option
 # -------------------------------------------------------------
 # ENDPOINT 1: SOUNDBOX TELEMETRY & SPOOF VERIFICATION
 # -------------------------------------------------------------
+def _merchant_for_device(device_imei: str) -> Optional[Dict[str, Any]]:
+    return next((m for m in MERCHANT_DATABASE.values() if m["device_imei"] == device_imei), None)
+
+def _spoof_reason(txn: Optional[Dict[str, Any]], req: VerifyPacketRequest) -> Optional[str]:
+    """Returns why a payment claim is not genuine, or None if it checks out."""
+    if not txn:
+        return f"Transaction ID '{req.txn_id}' does not exist on the Paytm gateway."
+    if txn["device_imei"] != req.device_imei:
+        return "This receipt belongs to a different merchant's Soundbox (replayed receipt)."
+    if (time.time() - txn["timestamp"]) * 1000 > req.timestamp_window:
+        return "This payment is older than the verification window (re-used old receipt)."
+    if req.claimed_amount is not None and abs(req.claimed_amount - txn["amount"]) > 0.005:
+        return f"Screen shows ₹{req.claimed_amount:.2f} but the gateway received ₹{txn['amount']:.2f}."
+    return None
+
 @app.post("/api/v1/telemetry/verify-packet", response_model=VerifyPacketResponse)
 async def verify_packet(req: VerifyPacketRequest):
     """
-    Sub-600ms endpoint cross-referencing payment gateway hashes with MQTT QoS 1 telemetry.
-    Differentiates 2G cellular network buffering from malicious Paytm Spoof attacks.
+    Cross-references a claimed payment with the gateway record and Soundbox MQTT telemetry.
+    A claim is genuine only if the transaction exists, was paid to THIS device's merchant,
+    is recent, and (when given) matches the amount on the customer's screen.
     """
-    start_time = time.time()
+    start = time.perf_counter()
     OBSERVABILITY_METRICS["telemetry_verifications_count"] += 1
+    merchant = _merchant_for_device(req.device_imei)
+    if not merchant:
+        raise HTTPException(status_code=404, detail="Soundbox device not registered to any merchant.")
 
-    # 1. Check if Transaction Hash exists in Gateway Switch
     txn = KNOWN_GATEWAY_HASHES.get(req.txn_id)
+    reason = _spoof_reason(txn, req)
 
-    if not txn:
-        # Counterfeit / Spoofed Transaction
+    def elapsed_ms() -> int:
+        ms = int(round((time.perf_counter() - start) * 1000))
+        OBSERVABILITY_METRICS["latency_records_ms"].append(ms)
+        return ms
+
+    if reason:
         OBSERVABILITY_METRICS["spoofs_detected_count"] += 1
-        elapsed_ms = int((time.time() - start_time) * 1000)
-        OBSERVABILITY_METRICS["latency_records_ms"].append(elapsed_ms)
-
-        # Broadcast Fraud Alert to P4B
-        fraud_alert = {
+        P4B_NOTIFICATION_STORE.append({
             "notification_type": "FRAUD_ALERT_SPOOF_ATTEMPT",
-            "merchant_id": "HelloM8xxxxxxxx45",
+            "merchant_id": merchant["mid"],
             "title": "🚨 FAKE PAYMENT ATTEMPT DETECTED",
-            "body": f"Transaction ID '{req.txn_id}' does not exist on Paytm Gateway. Do NOT hand over goods.",
+            "body": f"{reason} Do NOT hand over goods.",
             "timestamp": int(time.time()),
             "priority": "CRITICAL"
-        }
-        P4B_NOTIFICATION_STORE.append(fraud_alert)
-
+        })
         return VerifyPacketResponse(
             status="SPOOF_DETECTED",
-            gateway_hash_matched=False,
-            mqtt_publish_detected=False,
-            puback_received=False,
-            latency_ms=elapsed_ms,
+            gateway_hash_matched=txn is not None,
+            mqtt_publish_detected=bool(txn and txn["mqtt_publish_sent"]),
+            puback_received=bool(txn and txn["puback_received"]),
+            latency_ms=elapsed_ms(),
             deduplicated=False,
-            message="No legitimate transaction hash found in payment gateway. Counterfeit spoof attempt intercepted.",
+            message=reason,
             p4b_action_triggered="FRAUD_ALERT_SPOOF_ATTEMPT"
         )
 
-    # 2. Legitimate Transaction - Check 2G Cellular MQTT Telemetry State
-    mqtt_status = txn.get("mqtt_status")
-    elapsed_ms = int((time.time() - start_time) * 1000) + 42 # Add synthetic switch verification latency (~42ms)
-    OBSERVABILITY_METRICS["latency_records_ms"].append(elapsed_ms)
+    # QoS 1 can redeliver the same event; announce each genuine payment only once
+    repeat = req.txn_id in ANNOUNCED_TXNS
+    ANNOUNCED_TXNS.add(req.txn_id)
 
-    if mqtt_status == "QOS1_PUBACK_DELAYED":
-        # 2G cellular lag: PUBLISH recorded on broker, but PUBACK delayed/dropped
-        OBSERVABILITY_METRICS["lagged_audio_alerts_count"] += 1
-
-        p4b_push = {
-            "notification_type": "AUDIO_DELAYED_CONFIRMATION",
-            "merchant_id": "HelloM8xxxxxxxx45",
-            "title": f"Payment of ₹{txn['amount']:.2f} Received",
-            "body": "Soundbox audio delayed due to 2G network congestion. Payment is mathematically genuine.",
-            "txn_id": req.txn_id,
-            "amount": txn["amount"],
-            "timestamp": int(time.time()),
-            "priority": "HIGH"
-        }
-        P4B_NOTIFICATION_STORE.append(p4b_push)
-
+    if not txn["puback_received"]:
+        # 2G lag: the broker sent PUBLISH but the Soundbox has not acknowledged it yet
+        action = None
+        if not repeat:
+            OBSERVABILITY_METRICS["lagged_audio_alerts_count"] += 1
+            P4B_NOTIFICATION_STORE.append({
+                "notification_type": "AUDIO_DELAYED_CONFIRMATION",
+                "merchant_id": merchant["mid"],
+                "title": f"Payment of ₹{txn['amount']:.2f} Received",
+                "body": "Soundbox audio is delayed by a weak network. The payment is confirmed on the gateway.",
+                "txn_id": req.txn_id,
+                "amount": txn["amount"],
+                "timestamp": int(time.time()),
+                "priority": "HIGH"
+            })
+            action = "AUDIO_DELAYED_CONFIRMATION"
         return VerifyPacketResponse(
             status="AUDIO_DELAYED",
             gateway_hash_matched=True,
-            mqtt_publish_detected=True,
+            mqtt_publish_detected=txn["mqtt_publish_sent"],
             puback_received=False,
-            latency_ms=elapsed_ms,
-            deduplicated=True,
-            message=f"Genuine payment of ₹{txn['amount']:.2f} verified in gateway. Soundbox audio delayed by 2G MQTT latency.",
-            p4b_action_triggered="AUDIO_DELAYED_CONFIRMATION"
+            latency_ms=elapsed_ms(),
+            deduplicated=repeat,
+            message=f"Genuine payment of ₹{txn['amount']:.2f} confirmed on the gateway. Soundbox audio delayed by network lag.",
+            p4b_action_triggered=action
         )
 
-    # 3. Normal Delivered State
     return VerifyPacketResponse(
         status="VERIFIED_DELIVERED",
         gateway_hash_matched=True,
         mqtt_publish_detected=True,
         puback_received=True,
-        latency_ms=elapsed_ms,
-        deduplicated=True,
-        message=f"Transaction verified and Soundbox audio acknowledged.",
+        latency_ms=elapsed_ms(),
+        deduplicated=repeat,
+        message="Transaction verified and Soundbox audio acknowledged.",
         p4b_action_triggered=None
     )
+
+@app.post("/api/v1/sandbox/gateway/payments")
+async def create_sandbox_payment(req: SandboxPaymentRequest):
+    """Sandbox only: records a genuine customer payment on the mock gateway, as if it just cleared."""
+    if not _merchant_for_device(req.device_imei):
+        raise HTTPException(status_code=404, detail="Soundbox device not registered to any merchant.")
+    txn_id = f"TXN_{uuid.uuid4().hex[:10].upper()}"
+    KNOWN_GATEWAY_HASHES[txn_id] = {
+        "txn_id": txn_id,
+        "rrn": str(uuid.uuid4().int)[:12],
+        "amount": round(req.amount, 2),
+        "timestamp": time.time(),
+        "status": "SUCCESS",
+        "device_imei": req.device_imei,
+        "mqtt_status": "DELIVERED" if req.mqtt_delivered else "QOS1_PUBACK_DELAYED",
+        "mqtt_publish_sent": True,
+        "puback_received": req.mqtt_delivered
+    }
+    return KNOWN_GATEWAY_HASHES[txn_id]
 
 # -------------------------------------------------------------
 # ENDPOINT 2: DETERMINISTIC LIQUIDITY SIMULATION & EMI GUARD
@@ -495,6 +510,9 @@ async def parse_supplier_bill(req: ParseBillRequest):
     import re
     cleaned_text = re.sub(r'\b\d{9,18}\b', '[REDACTED_ACC]', raw_text)
     cleaned_text = re.sub(r'[A-Z]{5}[0-9]{4}[A-Z]{1}', '[REDACTED_PAN]', cleaned_text)
+    if cleaned_text != raw_text:
+        # The agent should have redacted this before sending it; count it as a leak
+        OBSERVABILITY_METRICS["pii_leakage_detected"] += 1
 
     # Extract vendor and amount
     extracted_amount = 4500.00
@@ -533,8 +551,9 @@ async def get_merchant_notifications(merchant_id: str):
 
 @app.get("/api/v1/observability/metrics")
 async def get_observability_metrics():
-    latencies = OBSERVABILITY_METRICS["latency_records_ms"]
+    latencies = sorted(OBSERVABILITY_METRICS["latency_records_ms"])
     avg_latency = (sum(latencies) / len(latencies)) if latencies else 0.0
+    p95_latency = latencies[min(len(latencies) - 1, int(0.95 * len(latencies)))] if latencies else 0.0
 
     return {
         "platform": "Phinite Enterprise Agentic OS",
@@ -548,9 +567,9 @@ async def get_observability_metrics():
             "loan_emi_defaults_prevented": OBSERVABILITY_METRICS["loan_defaults_prevented_count"],
             "total_capital_settled_inr": OBSERVABILITY_METRICS["total_settled_amount"],
             "avg_spoof_guard_latency_ms": round(avg_latency, 2),
-            "latency_sla_compliance": "<600ms (PASSED)" if avg_latency <= 600 else "EXCEEDED",
-            "pii_leakage_events": OBSERVABILITY_METRICS["pii_leakage_detected"],
-            "math_calculation_hallucinations": OBSERVABILITY_METRICS["math_hallucinations_detected"]
+            "p95_spoof_guard_latency_ms": p95_latency,
+            "latency_sla_compliance": "NO DATA" if not latencies else ("p95 <= 600ms (PASSED)" if p95_latency <= 600 else "EXCEEDED"),
+            "pii_leakage_events": OBSERVABILITY_METRICS["pii_leakage_detected"]
         }
     }
 
