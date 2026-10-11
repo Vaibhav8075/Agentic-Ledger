@@ -151,7 +151,7 @@ add_text(slide, "An autonomous multi-agent system for India's everyday merchant.
 circle(slide, 9.0, 1.15, 2.55, RGBColor(14, 45, 68), RGBColor(14, 45, 68))
 circle(slide, 9.55, 1.70, 1.45, CYAN, CYAN)
 add_text(slide, "₹", 9.55, 1.93, 1.45, 0.65, 38, NAVY, True, align=PP_ALIGN.CENTER, valign=MSO_ANCHOR.MIDDLE, font=DISPLAY)
-for yy, label, value, accent in [(4.5, "PAYMENT TRUST", "< 200 ms", CYAN), (5.35, "CASHFLOW SAFETY", "₹8,450", ORANGE), (6.2, "DEPLOYMENT", "AWS-ready", TEAL)]:
+for yy, label, value, accent in [(4.5, "PAYMENT TRUST", "< 600 ms SLA", CYAN), (5.35, "CASHFLOW SAFETY", "EMI first", ORANGE), (6.2, "DEPLOYMENT", "Dockerised", TEAL)]:
     add_text(slide, label, 8.3, yy, 2.4, 0.2, 9, RGBColor(142, 168, 184), True)
     add_text(slide, value, 10.75, yy - 0.04, 1.7, 0.3, 14, accent, True, align=PP_ALIGN.RIGHT)
 footer(slide, 1, True)
@@ -171,7 +171,7 @@ add_text(slide, "Checkout stops. Anxiety rises. A real payment looks like a spoo
 rect(slide, 6.82, 2.18, 5.8, 3.8, NAVY, NAVY, True)
 add_text(slide, "02", 7.15, 2.52, 0.55, 0.4, 23, ORANGE, True, font=DISPLAY)
 add_text(slide, "The 4:00 PM crunch", 7.82, 2.55, 3.9, 0.35, 17, WHITE, True)
-add_text(slide, "The distributor needs ₹4,500 now.\nThe merchant has ₹1,000 in the bank.", 7.15, 3.05, 4.95, 0.72, 15, RGBColor(184, 201, 211))
+add_text(slide, "The distributor needs ₹4,500 now.\nThe merchant has ₹6,000 unsettled.", 7.15, 3.05, 4.95, 0.72, 15, RGBColor(184, 201, 211))
 line(slide, 7.15, 4.07, 12.25, 4.07, RGBColor(49, 71, 91), 1)
 add_text(slide, "MERCHANT COST", 7.15, 4.37, 1.4, 0.2, 9, RGBColor(150, 174, 188), True)
 add_text(slide, "A full sweep can break tomorrow's ₹3,000 loan EMI.", 7.15, 4.66, 4.95, 0.56, 14, ORANGE, True)
@@ -194,14 +194,14 @@ for i, ((label, sub, accent), x) in enumerate(zip(steps, xs)):
         line(slide, x + 2.2, 3.22, xs[i + 1], 3.22, LINE, 1.5)
 # result panels
 rect(slide, 0.82, 4.62, 5.65, 1.35, RGBColor(255, 242, 242), RGBColor(255, 226, 226), True)
-add_text(slide, "HASH MISMATCH", 1.08, 4.88, 1.75, 0.2, 10, RED, True)
+add_text(slide, "NO VALID MATCH", 1.08, 4.88, 1.75, 0.2, 10, RED, True)
 add_text(slide, "FRAUD ALERT", 1.08, 5.2, 2.6, 0.35, 20, RED, True, font=DISPLAY)
-add_text(slide, "Fake payment app detected → P4B alert", 3.15, 5.22, 2.9, 0.3, 12, INK)
+add_text(slide, "Fake or replayed receipt → P4B alert", 3.15, 5.22, 2.9, 0.3, 12, INK)
 rect(slide, 6.84, 4.62, 5.65, 1.35, RGBColor(235, 249, 246), RGBColor(208, 235, 227), True)
 add_text(slide, "HASH MATCH + PUBACK DELAY", 7.1, 4.88, 2.65, 0.2, 10, GREEN, True)
 add_text(slide, "PAYMENT SAFE", 7.1, 5.2, 2.35, 0.35, 20, GREEN, True, font=DISPLAY)
 add_text(slide, "Audio delayed due to network → anxiety removed", 9.45, 5.22, 2.55, 0.3, 12, INK)
-add_metric(slide, "< 200 ms", "DECISION LATENCY", 0.82, 6.28, 2.4, CYAN)
+add_metric(slide, "< 600 ms", "LATENCY BUDGET", 0.82, 6.28, 2.4, CYAN)
 add_metric(slide, "15–45 sec", "2G BUFFERING WINDOW", 3.5, 6.28, 2.4, ORANGE)
 add_metric(slide, "QoS 1", "MQTT SIGNAL", 6.18, 6.28, 2.4, TEAL)
 add_metric(slide, "P4B", "NATIVE ACTION", 8.86, 6.28, 2.4, GREEN)
@@ -209,20 +209,20 @@ footer(slide, 3)
 
 # Slide 4
 slide = new_slide(NAVY)
-title(slide, "03  /  Intelligent liquidity", "Predict tomorrow before approving today.", "The Liquidity Engine protects inventory and preserves the merchant's repayment path.", dark=True)
+title(slide, "03  /  Intelligent liquidity", "Forecast tonight, but trust only the floor.", "The Liquidity Engine protects inventory and preserves the merchant's repayment path.", dark=True)
 # left scenario
 rect(slide, 0.8, 2.2, 5.0, 3.85, RGBColor(17, 35, 58), RGBColor(36, 60, 82), True)
 add_text(slide, "THE INPUT", 1.12, 2.55, 1.2, 0.2, 10, CYAN, True)
 add_text(slide, "Amul invoice", 1.12, 2.92, 2.7, 0.35, 20, WHITE, True, font=DISPLAY)
 add_text(slide, "Supplier asks for immediate payment", 1.12, 3.42, 3.8, 0.25, 13, RGBColor(184, 201, 211))
 line(slide, 1.12, 4.05, 5.35, 4.05, RGBColor(44, 70, 91), 1)
-for y, label, val, col in [(4.35, "Invoice due", "₹4,500", ORANGE), (4.78, "Current bank balance", "₹1,000", RED), (5.21, "Tomorrow's EMI", "₹3,000", CYAN)]:
+for y, label, val, col in [(4.35, "Invoice due", "₹4,500", ORANGE), (4.78, "Unsettled balance", "₹6,000", RED), (5.21, "Tomorrow's EMI", "₹3,000", CYAN)]:
     add_text(slide, label, 1.12, y, 2.35, 0.2, 11, RGBColor(164, 186, 198))
     add_text(slide, val, 4.1, y - 0.04, 1.25, 0.27, 14, col, True, align=PP_ALIGN.RIGHT)
 # right prediction
 add_text(slide, "THE PREDICTION", 6.5, 2.55, 1.7, 0.2, 10, ORANGE, True)
 add_text(slide, "Tonight's evening rush", 6.5, 2.92, 4.8, 0.35, 20, WHITE, True, font=DISPLAY)
-add_text(slide, "PyTorch LSTM trained on 400,000 retail rows", 6.5, 3.42, 5.2, 0.25, 13, RGBColor(184, 201, 211))
+add_text(slide, "PyTorch LSTM, scored on held-out days", 6.5, 3.42, 5.2, 0.25, 13, RGBColor(184, 201, 211))
 # chart
 line(slide, 6.6, 5.65, 12.18, 5.65, RGBColor(61, 86, 105), 1)
 line(slide, 6.6, 4.12, 6.6, 5.65, RGBColor(61, 86, 105), 1)
@@ -231,27 +231,27 @@ for (x1, y1), (x2, y2) in zip(points, points[1:]):
     line(slide, x1, y1, x2, y2, ORANGE, 3)
 for x, y in points:
     circle(slide, x - 0.06, y - 0.06, 0.12, ORANGE)
-add_text(slide, "₹8,450", 10.75, 3.83, 1.45, 0.45, 28, ORANGE, True, font=DISPLAY, align=PP_ALIGN.RIGHT)
-add_text(slide, "predicted evening revenue", 10.25, 4.3, 1.95, 0.22, 10, RGBColor(167, 188, 199), align=PP_ALIGN.RIGHT)
+add_text(slide, "₹6,894", 10.75, 3.83, 1.45, 0.45, 28, ORANGE, True, font=DISPLAY, align=PP_ALIGN.RIGHT)
+add_text(slide, "floor · ₹9,061 expected", 10.25, 4.3, 1.95, 0.22, 10, RGBColor(167, 188, 199), align=PP_ALIGN.RIGHT)
 add_text(slide, "The AI does not ask: ‘Can they pay now?’", 6.5, 6.08, 5.7, 0.28, 14, WHITE, True)
 add_text(slide, "It asks: ‘Can they pay and still stay healthy tomorrow?’", 6.5, 6.42, 5.7, 0.28, 14, CYAN, True)
 footer(slide, 4, True)
 
 # Slide 5
 slide = new_slide(WHITE)
-title(slide, "04  /  Safety by construction", "The approval is intelligent. The boundary is deterministic.", "Machine learning predicts the trajectory; a hard guardrail decides what is allowed.")
+title(slide, "04  /  Safety by construction", "The forecast can help. The EMI reserve is never touched.", "A deterministic plan decides; the agent re-checks it before anything is paid.")
 # formula band
 rect(slide, 0.78, 2.18, 11.8, 1.22, NAVY, NAVY, True)
-add_text(slide, "REQUESTED SETTLEMENT  +  PROJECTED EMI  ≤  CURRENT UNSETTLED BALANCE", 1.1, 2.48, 11.1, 0.45, 19, WHITE, True, align=PP_ALIGN.CENTER, font=DISPLAY)
+add_text(slide, "SETTLE NOW  ≤  BALANCE − EMI      ADVANCE  ≤  MIN(FORECAST FLOOR, LIMIT)", 1.1, 2.48, 11.1, 0.45, 17, WHITE, True, align=PP_ALIGN.CENTER, font=DISPLAY)
 # numbers
-items = [("₹4,500", "supplier payment", ORANGE), ("+ ₹3,000", "protected EMI", CYAN), ("≤ ₹12,000", "unsettled balance", GREEN)]
+items = [("₹3,000", "settled from balance", ORANGE), ("₹1,500", "advance, repaid tonight", CYAN), ("₹3,000", "kept for the EMI", GREEN)]
 for i, (value, label, col) in enumerate(items):
     x = 1.1 + i * 4.02
     rect(slide, x, 4.08, 3.45, 1.23, LIGHT, LIGHT, True)
     add_text(slide, value, x + 0.18, 4.35, 3.1, 0.3, 22, col, True, align=PP_ALIGN.CENTER, font=DISPLAY)
     add_text(slide, label.upper(), x + 0.18, 4.78, 3.1, 0.2, 9, MUTED, True, align=PP_ALIGN.CENTER)
     if i < 2:
-        add_text(slide, "+" if i == 0 else "≤", x + 3.55, 4.43, 0.45, 0.25, 20, MUTED, True, align=PP_ALIGN.CENTER)
+        add_text(slide, "+" if i == 0 else "|", x + 3.55, 4.43, 0.45, 0.25, 20, MUTED, True, align=PP_ALIGN.CENTER)
 # outcome
 rect(slide, 0.78, 5.85, 5.7, 0.7, RGBColor(235, 249, 246), RGBColor(208, 235, 227), True)
 add_text(slide, "APPROVED", 1.05, 6.08, 1.25, 0.22, 12, GREEN, True)
@@ -291,7 +291,7 @@ title(slide, "06  /  Production readiness", "Built to move from demo to dependab
 features = [
     ("FASTAPI", "Idempotent APIs\nand 504 recovery", CYAN),
     ("PHINITE", "Maker-checker\n+ PII redaction", TEAL),
-    ("DOCKER", "Containerized\nAWS-ready deployment", ORANGE),
+    ("DOCKER", "Containerized\nbackend + live UI", ORANGE),
     ("OBSERVABILITY", "Actionable states\nfrom lag to success", GREEN),
 ]
 for i, (label, desc, col) in enumerate(features):

@@ -267,6 +267,12 @@ async def verify_packet(req: VerifyPacketRequest):
         p4b_action_triggered=None
     )
 
+@app.get("/healthz")
+async def healthz():
+    """Liveness/readiness probe: also confirms the forecaster loads."""
+    get_forecaster()
+    return {"status": "ok"}
+
 @app.post("/api/v1/sandbox/reset")
 async def reset_sandbox():
     """Sandbox only: restores the seeded merchant ledger and clears payments, orders and metrics."""

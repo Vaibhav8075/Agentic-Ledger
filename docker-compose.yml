@@ -1,22 +1,27 @@
-version: '3.8'
-
 services:
   backend:
     build: .
-    container_name: paytm_mock_backend
+    container_name: vyapar_saathi_backend
+    command: uvicorn mock_backend.main:app --host 0.0.0.0 --port 8000
+    environment:
+      VS_MERCHANT_SIGNING_KEY: ${VS_MERCHANT_SIGNING_KEY:-sandbox-signing-key-not-secret}
     ports:
       - "8000:8000"
-    command: uvicorn mock_backend.main:app --host 0.0.0.0 --port 8000
-    volumes:
-      - .:/app
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   frontend:
     build: .
-    container_name: paytm_streamlit_ui
+    container_name: vyapar_saathi_ui
+    command: streamlit run streamlit_app.py --server.address=0.0.0.0 --server.port=8501
+    environment:
+      VS_BACKEND_URL: http://backend:8000
+      VS_MERCHANT_SIGNING_KEY: ${VS_MERCHANT_SIGNING_KEY:-sandbox-signing-key-not-secret}
     ports:
       - "8501:8501"
-    command: streamlit run streamlit_app.py --server.address=0.0.0.0
     depends_on:
-      - backend
-    volumes:
-      - .:/app
+      backend:
+        condition: service_healthy
