@@ -12,18 +12,25 @@ import re
 import time
 from typing import Any, Dict, List, Tuple
 
+# Order matters: longer / more specific patterns first, so each number gets the right label.
+PII_PATTERNS = [
+    ("[REDACTED_CARD]", re.compile(r"\b(?:\d{4}[ -]){3}\d{4}\b")),
+    ("[REDACTED_AADHAAR]", re.compile(r"\b[2-9]\d{3}[ -]?\d{4}[ -]?\d{4}\b")),
+    ("[REDACTED_PHONE]", re.compile(r"(?:\+91[ -]?)?\b[6-9]\d{4}[ -]?\d{5}\b")),
+    ("[REDACTED_BANK_ACC]", re.compile(r"\b\d{9,18}\b")),
+    ("[REDACTED_PAN]", re.compile(r"\b[A-Z]{5}[0-9]{4}[A-Z]\b")),
+    ("[REDACTED_IFSC]", re.compile(r"\b[A-Z]{4}0[A-Z0-9]{6}\b")),
+    ("[REDACTED_VPA]", re.compile(r"\b[\w.-]+@[\w-]+(?:\.[\w-]+)*\b")),
+]
+
 def sanitize_pii(text: str) -> Tuple[str, bool]:
     """
-    Masks PAN cards, bank accounts, and IFSC codes before sending to any LLM prompt.
-    Returns (sanitized_text, had_pii).
+    Masks card, Aadhaar, phone, bank account, PAN, IFSC and VPA/e-mail before any text reaches an LLM.
+    Returns (sanitized_text, had_pii). The backend uses the same function to detect leaks.
     """
     original = text
-    # Mask 10-character PAN (e.g. ABCDE1234F)
-    text = re.sub(r'\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b', '[REDACTED_PAN]', text)
-    # Mask 9 to 18-digit bank account numbers
-    text = re.sub(r'\b\d{9,18}\b', '[REDACTED_BANK_ACC]', text)
-    # Mask 11-char IFSC codes
-    text = re.sub(r'\b[A-Z]{4}0[A-Z0-9]{6}\b', '[REDACTED_IFSC]', text)
+    for label, pattern in PII_PATTERNS:
+        text = pattern.sub(label, text)
     return text, text != original
 
 def assert_liquidity_guardrail(
