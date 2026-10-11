@@ -40,19 +40,19 @@ class MasterSupervisorAgent:
 
     async def optimize_cashflow(
         self,
-        current_unsettled_balance: float,
         due_amount: float,
-        cutoff_time: str,
-        merchant_id: str = config.DEMO_MERCHANT_ID
+        cutoff_time: Optional[str] = None,
+        merchant_id: str = config.DEMO_MERCHANT_ID,
+        vendor_id: str = "supplier"
     ) -> Dict[str, Any]:
         """
-        Dispatches to Worker 3 (Liquidity Engine) for EMI assertion.
+        Dispatches to Worker 3 (Liquidity Engine) for an EMI-safe payment plan.
         """
         return await self.liquidity_engine.simulate_cashflow(
-            current_unsettled_balance=current_unsettled_balance,
             due_amount=due_amount,
             cutoff_time=cutoff_time,
-            merchant_id=merchant_id
+            merchant_id=merchant_id,
+            vendor_id=vendor_id
         )
 
     async def execute_settlement(

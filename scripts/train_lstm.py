@@ -1,112 +1,158 @@
+"""
+Trains the evening-revenue LSTM and writes an honest evaluation report.
+
+Data: datasets/synthetic_sales_data_400k.csv (a synthetic retail sales dataset from Kaggle).
+Each Region-and-Sales-Rep pair is treated as one "merchant", giving 20 daily sales series of
+730 days. The dataset has no time of day, so the morning (00:00-16:00) / evening split is
+SYNTHETIC: each day's morning share is drawn from N(0.40, 0.05). Metrics therefore show that the
+pipeline works end to end; they are not evidence of performance on real Paytm merchants.
+
+Split: chronological by target date (70% train / 15% validation / 15% test). The validation set
+drives early stopping and calibrates the conservative floor; the test set is used once at the end.
+
+Outputs: models/evening_lstm.pt (weights + metadata) and models/metrics.json.
+"""
+
+import json
 import os
-import pandas as pd
+import sys
+
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
-from sklearn.preprocessing import MinMaxScaler
-import pickle
 
-# Configuration
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from ml.forecaster import (DEFAULT_MODEL_PATH, FEATURE_VERSION, HISTORY_DAYS, EveningRevenueLSTM,
+                           Forecaster, to_relative)
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_PATH = os.path.join(BASE_DIR, "datasets", "synthetic_sales_data_400k.csv")
-MODEL_DIR = os.path.join(BASE_DIR, "models")
-os.makedirs(MODEL_DIR, exist_ok=True)
+METRICS_PATH = os.path.join(BASE_DIR, "models", "metrics.json")
+SEED = 42
+FLOOR_QUANTILE = 0.10  # the floor should be beaten on ~90% of days
+HIDDEN_SIZE = 16
 
-print("Loading 400k Kaggle Dataset...")
-df = pd.read_csv(DATA_PATH)
 
-print("Engineering Time-Series Features (Morning vs Evening)...")
-# Group by Date to get daily totals
-daily_sales = df.groupby('Sale_Date')['Sales_Amount'].sum().reset_index()
-daily_sales = daily_sales.sort_values('Sale_Date')
+def build_samples(df: pd.DataFrame, rng: np.random.Generator):
+    daily = (df.groupby(["Region_and_Sales_Rep", "Sale_Date"])["Sales_Amount"].sum()
+               .reset_index().sort_values(["Region_and_Sales_Rep", "Sale_Date"]))
+    past, morning, target, dates = [], [], [], []
+    for _, series in daily.groupby("Region_and_Sales_Rep"):
+        totals = series["Sales_Amount"].to_numpy()
+        share = np.clip(rng.normal(0.40, 0.05, len(totals)), 0.2, 0.6)  # synthetic morning share
+        day = np.stack([totals * share, totals * (1 - share)], axis=1)  # [morning, evening]
+        for i in range(HISTORY_DAYS, len(day)):
+            past.append(day[i - HISTORY_DAYS:i])
+            morning.append(day[i, 0])
+            target.append(day[i, 1])
+            dates.append(series["Sale_Date"].iloc[i])
+    return np.array(past), np.array(morning), np.array(target), np.array(dates)
 
-# Synthesize Morning (00:00-16:00) and Evening (16:00-24:00) splits
-# We assume Morning makes up roughly 40% of sales and Evening 60%, with some random noise
-np.random.seed(42)
-noise = np.random.normal(0.4, 0.05, len(daily_sales)) # Mean 40%, std 5%
-daily_sales['Morning_Sales'] = daily_sales['Sales_Amount'] * noise
-daily_sales['Evening_Sales'] = daily_sales['Sales_Amount'] - daily_sales['Morning_Sales']
 
-# We want to predict Today's Evening Sales based on:
-# [Yesterday_Morning, Yesterday_Evening, Today_Morning]
-data = daily_sales[['Morning_Sales', 'Evening_Sales']].values
+def scores(actual: np.ndarray, predicted: np.ndarray) -> dict:
+    err = actual - predicted
+    return {
+        "mae_inr": round(float(np.abs(err).mean()), 2),
+        "mape_pct": round(float(np.mean(np.abs(err) / actual) * 100), 2),
+        "r2": round(float(1 - (err ** 2).sum() / ((actual - actual.mean()) ** 2).sum()), 4),
+    }
 
-# Prepare sequences
-SEQUENCE_LENGTH = 3 # Look back 3 days
-X, y = [], []
-for i in range(SEQUENCE_LENGTH, len(data)):
-    # Flatten the past 3 days [Morning, Evening] and today's [Morning]
-    seq = data[i-SEQUENCE_LENGTH:i].flatten().tolist()
-    seq.append(data[i, 0]) # Today's morning
-    
-    X.append(seq)
-    y.append(data[i, 1]) # Target: Today's evening
 
-X = np.array(X)
-y = np.array(y).reshape(-1, 1)
+def main():
+    torch.manual_seed(SEED)
+    rng = np.random.default_rng(SEED)
 
-print("Scaling data...")
-scaler_X = MinMaxScaler()
-scaler_y = MinMaxScaler()
-X_scaled = scaler_X.fit_transform(X)
-y_scaled = scaler_y.fit_transform(y)
+    print("Loading dataset...")
+    df = pd.read_csv(DATA_PATH, usecols=["Sale_Date", "Region_and_Sales_Rep", "Sales_Amount"])
+    past, morning, target, dates = build_samples(df, rng)
 
-# Reshape for LSTM: (Samples, TimeSteps, Features)
-# We treat the entire sequence as 1 timestep with multiple features for simplicity in this fast hackathon model
-X_scaled = X_scaled.reshape((X_scaled.shape[0], 1, X_scaled.shape[1]))
+    unique_dates = np.sort(np.unique(dates))
+    train_end = unique_dates[int(len(unique_dates) * 0.70)]
+    val_end = unique_dates[int(len(unique_dates) * 0.85)]
+    split = {"train": dates < train_end, "val": (dates >= train_end) & (dates < val_end), "test": dates >= val_end}
+    print({k: int(v.sum()) for k, v in split.items()}, "samples")
 
-# Convert to PyTorch Tensors
-X_tensor = torch.tensor(X_scaled, dtype=torch.float32)
-y_tensor = torch.tensor(y_scaled, dtype=torch.float32)
+    past_rel, morning_rel, scale = to_relative(past, morning)
+    target_rel = target / scale
 
-class LiquidityLSTM(nn.Module):
-    def __init__(self, input_size):
-        super(LiquidityLSTM, self).__init__()
-        self.lstm = nn.LSTM(input_size, hidden_size=16, batch_first=True)
-        self.fc1 = nn.Linear(16, 8)
-        self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(8, 1)
-        
-    def forward(self, x):
-        out, _ = self.lstm(x)
-        out = self.fc1(out[:, -1, :])
-        out = self.relu(out)
-        out = self.fc2(out)
-        return out
+    def tensors(mask):
+        return (torch.tensor(past_rel[mask], dtype=torch.float32),
+                torch.tensor(morning_rel[mask][:, None], dtype=torch.float32),
+                torch.tensor(target_rel[mask][:, None], dtype=torch.float32))
 
-print("Training LSTM Neural Network...")
-model = LiquidityLSTM(input_size=X_tensor.shape[2])
-criterion = nn.MSELoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+    train_x, train_m, train_y = tensors(split["train"])
+    val_x, val_m, val_y = tensors(split["val"])
 
-epochs = 150
-for epoch in range(epochs):
-    model.train()
-    optimizer.zero_grad()
-    outputs = model(X_tensor)
-    loss = criterion(outputs, y_tensor)
-    loss.backward()
-    optimizer.step()
-    
-    if (epoch+1) % 30 == 0:
-        print(f"Epoch [{epoch+1}/{epochs}], Loss: {loss.item():.4f}")
+    model = EveningRevenueLSTM(HIDDEN_SIZE)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    loss_fn = nn.MSELoss()
+    best_val, best_state, patience, bad_epochs = float("inf"), None, 20, 0
 
-# Save Model and Scalers
-torch.save(model.state_dict(), os.path.join(MODEL_DIR, "lstm_model.pth"))
-with open(os.path.join(MODEL_DIR, "scaler_X.pkl"), "wb") as f:
-    pickle.dump(scaler_X, f)
-with open(os.path.join(MODEL_DIR, "scaler_y.pkl"), "wb") as f:
-    pickle.dump(scaler_y, f)
+    print("Training...")
+    for epoch in range(300):
+        model.train()
+        order = torch.randperm(len(train_y))
+        for start in range(0, len(order), 256):
+            idx = order[start:start + 256]
+            optimizer.zero_grad()
+            loss = loss_fn(model(train_x[idx], train_m[idx]), train_y[idx])
+            loss.backward()
+            optimizer.step()
+        model.eval()
+        with torch.no_grad():
+            val_loss = loss_fn(model(val_x, val_m), val_y).item()
+        if val_loss < best_val - 1e-6:
+            best_val, best_state, bad_epochs = val_loss, {k: v.clone() for k, v in model.state_dict().items()}, 0
+        else:
+            bad_epochs += 1
+        if (epoch + 1) % 25 == 0:
+            print(f"epoch {epoch + 1}: val MSE (relative) {val_loss:.5f}")
+        if bad_epochs >= patience:
+            print(f"Early stop at epoch {epoch + 1}")
+            break
+    model.load_state_dict(best_state)
 
-# Calculate simulated accuracy (R^2 equivalent logic for terminal flex)
-model.eval()
-with torch.no_grad():
-    predictions = model(X_tensor)
-    mse = criterion(predictions, y_tensor).item()
-    # Deliberately cap the display accuracy between 92.5% and 94.8% for hackathon authenticity
-    accuracy_flex = max(92.5, 94.8 - (mse * 10)) 
-    print(f"\n[OK] Training Complete.")
-    print(f"[OK] LSTM Neural Network saved to {MODEL_DIR}/lstm_model.pth")
-    print(f"[METRIC] LSTM Validation Accuracy (Out-of-Box): {accuracy_flex:.2f}%")
-    print(f"[METRIC] Overfitting prevented. Retained 5.6% variance threshold.")
-    print(f"Ready to be plugged into the Phinite Liquidity Engine!")
+    # Calibrate the conservative floor on validation data only
+    forecaster = Forecaster(model, floor_ratio=1.0)
+    val_pred = forecaster.predict_batch(past[split["val"]], morning[split["val"]])
+    floor_ratio = float(np.quantile(target[split["val"]] / val_pred, FLOOR_QUANTILE))
+
+    # Final, one-time evaluation on the test period
+    test = split["test"]
+    pred = forecaster.predict_batch(past[test], morning[test])
+    actual = target[test]
+    hist_evening = past[test][:, :, 1].mean(axis=1)
+    hist_ratio = (past[test][:, :, 1] / past[test][:, :, 0]).mean(axis=1)
+    hist_total = past[test].sum(axis=2).mean(axis=1)
+    metrics = {
+        "dataset": "datasets/synthetic_sales_data_400k.csv (synthetic, Kaggle); 20 Region-and-Sales-Rep series",
+        "caveat": "Morning/evening split is synthetic (dataset has no time of day). Not evidence of real-merchant performance.",
+        "split": {"train_before": str(train_end), "val_before": str(val_end),
+                  "samples": {k: int(v.sum()) for k, v in split.items()}},
+        "test": {
+            "lstm": scores(actual, pred),
+            "baseline_mean_of_last_3_evenings": scores(actual, hist_evening),
+            "baseline_morning_times_past_evening_ratio": scores(actual, morning[test] * hist_ratio),
+            "baseline_past_mean_total_minus_morning": scores(actual, np.maximum(hist_total - morning[test], 0)),
+        },
+        "floor": {
+            "quantile": FLOOR_QUANTILE,
+            "ratio_to_expected": round(floor_ratio, 4),
+            "test_coverage_pct": round(float(np.mean(actual >= pred * floor_ratio) * 100), 2),
+        },
+        "best_val_mse_relative": round(best_val, 6),
+        "seed": SEED,
+    }
+
+    torch.save({"state_dict": model.state_dict(), "hidden_size": HIDDEN_SIZE, "history_days": HISTORY_DAYS,
+                "feature_version": FEATURE_VERSION, "floor_ratio": floor_ratio}, DEFAULT_MODEL_PATH)
+    with open(METRICS_PATH, "w", encoding="utf-8") as f:
+        json.dump(metrics, f, indent=2)
+    print(json.dumps(metrics["test"], indent=2))
+    print(json.dumps(metrics["floor"], indent=2))
+    print(f"Saved {DEFAULT_MODEL_PATH} and {METRICS_PATH}")
+
+
+if __name__ == "__main__":
+    main()

@@ -156,24 +156,31 @@ nodes:
   - id: "maker_checker_assertion"
     type: "script_node"
     runtime: "python3.11"
-    description: "Hardcoded Boolean Assertion: (Requested + Daily_EMI) <= Current_Unsettled_Balance"
+    description: "Re-checks the Liquidity Engine's plan (same rules as agents/guardrails.py::check_payment_plan)"
     code: |
       def assert_liquidity(context):
-          req = float(context["due_amount"])
-          emi = float(context.get("daily_loan_emi", 3000.00))
           balance = float(context["current_unsettled_balance"])
-          
-          # HARD ASSERTION: Zero LLM hallucinations
-          if (req + emi) <= balance:
-              context["assertion_status"] = "PASSED"
-              context["safe_micro_settlement"] = req
-              context["reserved_for_emi"] = emi
-              context["residual_unsettled"] = balance - req
-              return context
-          else:
+          due = float(context["requested_settlement"])
+          emi = float(context["daily_loan_emi"])
+          floor = float(context["evening_forecast_floor"])
+          limit = float(context["advance_limit"])
+          settle = float(context["recommended_micro_settlement"])
+          advance = float(context["advance_amount"])
+
+          safe_now = max(0.0, balance - emi)
+          violations = []
+          if settle > safe_now + 0.01:
+              violations.append("settlement eats into the EMI reserve")
+          if advance > min(floor, limit) + 0.01:
+              violations.append("advance exceeds the forecast floor or the advance limit")
+          if settle + advance > due + 0.01:
+              violations.append("plan pays more than the bill")
+          if violations:
               context["assertion_status"] = "FAILED"
-              context["reason"] = f"Requested ₹{req} + EMI ₹{emi} exceeds balance ₹{balance}"
-              raise ValueError("Hard Maker-Checker assertion failed: loan default risk.")
+              context["violations"] = violations
+              raise ValueError("Maker-checker rejected the payment plan: " + "; ".join(violations))
+          context["assertion_status"] = "PASSED"
+          return context
 
   # -------------------------------------------------------------
   # PAYTM GATEWAY INTEGRATION: HMAC-SHA256 SIGNER & EXECUTOR

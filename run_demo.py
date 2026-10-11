@@ -164,30 +164,31 @@ async def main():
     print(f"  * Payment Cutoff: {Fore.WHITE}{parsed_invoice['cutoff_time']}")
     print(f"  * Line Items Extracted: {Fore.WHITE}{len(parsed_invoice['line_items'])} items")
 
-    print_step("SCENARIO 2B", "Deep Learning Liquidity Assertion (PyTorch LSTM)")
-    print(f"{Fore.WHITE}Current Merchant Unsettled T+1 Balance: {Fore.RED}Rs. 1,000.00 (Dangerously Low)")
-    print(f"{Fore.WHITE}Tomorrow 05:00 AM Automated Loan EMI:   {Fore.YELLOW}Rs. 3,000.00")
-    print(f"{Fore.WHITE}Requested Instant Payout to Amul:        {Fore.CYAN}Rs. 4,500.00")
+    print_step("SCENARIO 2B", "EMI-Safe Payment Plan (Ledger + PyTorch LSTM Floor)")
+    async with httpx.AsyncClient() as client:
+        state = (await client.get(f"{BACKEND_URL}/api/v1/merchant/state/{config.DEMO_MERCHANT_ID}")).json()
+    print(f"{Fore.WHITE}Unsettled balance at 16:00 (ledger):    {Fore.CYAN}Rs. {state['current_unsettled_balance']:,.2f}")
+    print(f"{Fore.WHITE}Tomorrow 05:00 AM automated loan EMI:   {Fore.YELLOW}Rs. {state['daily_loan_emi']:,.2f}")
+    print(f"{Fore.WHITE}Bill to pay:                            {Fore.CYAN}Rs. {parsed_invoice['due_amount']:,.2f}")
+    print(f"{Fore.RED}A full on-demand sweep would leave Rs. 0 and bounce tomorrow's EMI.")
 
-    print(f"\n{Fore.MAGENTA}Worker 3 (Liquidity Engine) loading PyTorch LSTM model...")
-    print(f"{Fore.WHITE}  * Feeding last 3 days of hourly transaction vectors into Neural Network...")
-    
+    print(f"\n{Fore.MAGENTA}Worker 3 (Liquidity Engine) planning the payment...")
     sim_result = await supervisor.optimize_cashflow(
-        current_unsettled_balance=1000.00,
         due_amount=parsed_invoice["due_amount"],
-        cutoff_time=parsed_invoice["cutoff_time"]
+        cutoff_time=parsed_invoice["cutoff_time"],
+        vendor_id="amul_distributor_vpa"
     )
-    predicted_evening = sim_result['projected_eod_balance'] - (1000.00 - sim_result['recommended_micro_settlement'])
-
-    print(f"  * LSTM Predicted Evening Revenue: {Fore.GREEN}Rs. {predicted_evening:,.2f}")
-    print(f"  * Total Projected Liquidity: {Fore.WHITE}Rs. {(1000.00 + predicted_evening):,.2f}")
-    print(f"  * AI Evaluated: {Fore.WHITE}Rs. 4,500 (Requested) + Rs. 3,000 (EMI) <= Rs. {(1000.00 + predicted_evening):,.2f} (Total Projected)")
-    print(f"  * Deep Learning Decision: {Fore.GREEN}{Style.BRIGHT}{sim_result['assertion_passed']} (PASSED - Micro-loan auto-approved based on future earnings)")
-    print(f"  * Recommended Targeted Micro-Settlement: {Fore.GREEN}Rs. {sim_result['recommended_micro_settlement']:,.2f}")
-    print(f"  * Protected Float Reserved for Morning EMI: {Fore.YELLOW}Rs. {sim_result['daily_loan_emi']:,.2f}")
-    print(f"  * Projected End-of-Day Ledger Balance: {Fore.WHITE}Rs. {sim_result['projected_eod_balance']:,.2f}")
-    print(f"  * Avoided Bank Loan Default Penalties: {Fore.GREEN}Rs. {sim_result['avoided_penalty_fees']:,.2f}")
-    assert sim_result["assertion_passed"] is True
+    print(f"  * Safe to settle now (balance - EMI): {Fore.GREEN}Rs. {sim_result['safe_settlement_limit']:,.2f}")
+    print(f"  * LSTM forecast of tonight's sales:   {Fore.WHITE}Rs. {sim_result['evening_forecast_expected']:,.2f} expected, "
+          f"Rs. {sim_result['evening_forecast_floor']:,.2f} conservative floor")
+    print(f"  * Decision: {Fore.GREEN}{Style.BRIGHT}{sim_result['decision']}")
+    print(f"  * Settle now: {Fore.GREEN}Rs. {sim_result['recommended_micro_settlement']:,.2f}"
+          f"{Fore.WHITE} | Advance: Rs. {sim_result['advance_amount']:,.2f} | Unpaid: Rs. {sim_result['unpaid_amount']:,.2f}")
+    print(f"  * Balance left for the EMI batch: {Fore.YELLOW}Rs. {sim_result['projected_eod_balance']:,.2f}")
+    check = sim_result["maker_checker_verification"]
+    print(f"  * Independent maker-checker: {Fore.GREEN if check['passed'] else Fore.RED}{'PASSED' if check['passed'] else check['violations']}")
+    assert check["passed"], "Maker-checker rejected the plan!"
+    assert sim_result["projected_eod_balance"] >= sim_result["daily_loan_emi"], "EMI reserve breached!"
     time.sleep(1)
 
     # =========================================================================
@@ -200,28 +201,35 @@ async def main():
     print(f"  * Title: {Fore.CYAN}{sim_result['p4b_notification_payload']['title']}")
     print(f"  * Body:  {Fore.WHITE}{sim_result['p4b_notification_payload']['body']}")
     print(f"  * Native Deep Link URI: {Fore.BLUE}{sim_result['action_deep_link']}")
-    print(f"  {Fore.GREEN}[OK] Merchant taps 1-click notification to approve Rs. 4,500 settlement.\n")
+    print(f"  {Fore.GREEN}[OK] Merchant taps the notification to approve the Rs. {sim_result['recommended_micro_settlement']:,.2f} settlement.\n")
 
-    # Step: 504 Timeout Simulation & Idempotent UDIR Recovery
-    print_step("SCENARIO 3B", "Handling Bank Switch 504 Timeout via NPCI UDIR Polling")
-    print(f"{Fore.MAGENTA}Merchant taps settle. Upstream Bank CBS experiences sudden latency (504 Timeout)...")
-    print(f"{Fore.WHITE}Supervisor halts blind retry (preventing double debit). Polling UDIR switch...")
+    # Step: 504 Timeout Simulation & Idempotent Recovery
+    print_step("SCENARIO 3B", "Handling a Bank Switch 504 Timeout Without Double Debit")
+    print(f"{Fore.MAGENTA}Merchant taps settle. Upstream Bank CBS times out (504)...")
+    print(f"{Fore.WHITE}Supervisor does not retry blindly; it checks the order status first...")
 
-    t_settle0 = time.time()
     udir_recovery = await supervisor.execute_settlement(
-        merchant_id="HelloM8xxxxxxxx45",
-        required_amount=4500.00,
+        merchant_id=config.DEMO_MERCHANT_ID,
+        required_amount=sim_result["recommended_micro_settlement"],
         routing_rail="IMPS",
+        simulate_504=True
+    )
+    retry = await supervisor.execute_settlement(
+        merchant_id=config.DEMO_MERCHANT_ID,
+        required_amount=sim_result["recommended_micro_settlement"],
+        routing_rail="IMPS",
+        order_id=udir_recovery["request"]["body"]["orderId"],
         simulate_504=True
     )
     print(f"  * NPCI UDIR Code: {Fore.GREEN}{udir_recovery['request']['body']['udir_reconciliation_code']} (Beneficiary Credited Post-Timeout)")
     print(f"  * UTR Number: {Fore.WHITE}{udir_recovery['request']['body']['utrNo']}")
     print(f"  * Status: {Fore.GREEN}{Style.BRIGHT}{udir_recovery['request']['body']['status']}")
-    print(f"  * Double Debit Guard: {Fore.GREEN}Active (100% Idempotent)")
+    print(f"  * Retry of the same order returned the original payout: {Fore.GREEN}no double debit")
+    assert retry["request"]["body"]["transactionId"] == udir_recovery["request"]["body"]["transactionId"]
     time.sleep(1)
 
-    # Step: Observability & Production Verification
-    print_step("EVALUATION", "Phinite LLM-as-a-Judge Observability Dashboard")
+    # Step: Observability
+    print_step("EVALUATION", "Observability Dashboard")
     async with httpx.AsyncClient() as client:
         obs_resp = await client.get(f"{BACKEND_URL}/api/v1/observability/metrics")
         obs_data = obs_resp.json()
@@ -231,7 +239,7 @@ async def main():
     print(f"  * Telemetry Verifications:         {Fore.CYAN}{metrics['telemetry_verifications']}")
     print(f"  * Spoof Attacks Neutralized:        {Fore.GREEN}{metrics['spoof_attacks_neutralized']}")
     print(f"  * 2G Audio Lag Calming Alerts:      {Fore.GREEN}{metrics['audio_delayed_calming_alerts']}")
-    print(f"  * Loan EMI Defaults Prevented:      {Fore.GREEN}{metrics['loan_emi_defaults_prevented']}")
+    print(f"  * EMI Breaches Prevented:           {Fore.GREEN}{metrics['emi_breaches_prevented']}")
     print(f"  * Total Capital Settled:            {Fore.GREEN}Rs. {metrics['total_capital_settled_inr']:,.2f}")
     print(f"  * Average Spoof Guard Latency:      {Fore.CYAN}{metrics['avg_spoof_guard_latency_ms']}ms ({metrics['latency_sla_compliance']})")
     print(f"  * p95 Spoof Guard Latency:          {Fore.CYAN}{metrics['p95_spoof_guard_latency_ms']}ms")

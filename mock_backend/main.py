@@ -10,6 +10,7 @@ import json
 import time
 import uuid
 from datetime import datetime
+from functools import lru_cache
 from typing import Any, Dict, List, Literal, Optional
 from fastapi import FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,7 +18,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 import config
-from agents.guardrails import compute_signature
+from agents.guardrails import compute_signature, plan_supplier_payment
+from ml.forecaster import Forecaster
 
 app = FastAPI(
     title="Paytm Vyapar Saathi Production Mock Backend",
@@ -43,8 +45,11 @@ def _seed_merchants() -> Dict[str, Dict[str, Any]]:
             "merchant_name": "Sharma General Store & Dairy",
             "secret_key": config.MERCHANT_SIGNING_KEY,
             "device_imei": "864201938472910",
-            "current_unsettled_balance": 12000.00,
-            "daily_loan_emi": 3000.00,
+            "current_unsettled_balance": 6000.00,   # today's collections not yet settled (16:00)
+            "daily_loan_emi": 3000.00,              # auto-deducted from the 05:00 T+1 batch
+            "advance_limit": 5000.00,               # pre-approved short advance (mock lending policy)
+            # [morning, evening] sales for the last 3 days and today's sales so far (mock history)
+            "sales_history": {"past_days": [[5800.0, 8900.0], [6200.0, 9400.0], [5600.0, 8600.0]], "today_morning": 6000.0},
             "settled_today": 0.00,
             "loan_account_id": "PAYTM_LOAN_782194",
             "bank_account_masked": "XXXXXX9182",
@@ -58,7 +63,7 @@ def _fresh_metrics() -> Dict[str, Any]:
         "spoofs_detected_count": 0,
         "lagged_audio_alerts_count": 0,
         "liquidity_simulations_count": 0,
-        "loan_defaults_prevented_count": 0,
+        "emi_breaches_prevented_count": 0,  # bills that would have eaten into the EMI reserve
         "total_settled_amount": 0.0,
         "pii_leakage_detected": 0,  # PII that reached the backend unredacted
         "latency_records_ms": []
@@ -109,21 +114,27 @@ class VerifyPacketResponse(BaseModel):
     p4b_action_triggered: Optional[str] = None
 
 class LiquiditySimulateRequest(BaseModel):
-    current_unsettled_balance: float
-    due_amount: float
-    cutoff_time: str
-    merchant_id: Optional[str] = "HelloM8xxxxxxxx45"
+    merchant_id: str = config.DEMO_MERCHANT_ID
+    due_amount: float = Field(gt=0)
+    cutoff_time: Optional[str] = None
+    vendor_id: str = "supplier"
 
 class LiquiditySimulateResponse(BaseModel):
     merchant_id: str
     current_unsettled_balance: float
     requested_settlement: float
     daily_loan_emi: float
-    assertion_passed: bool
-    projected_eod_balance: float
+    advance_limit: float
+    assertion_passed: bool  # strict check without any forecast: due + EMI <= balance
+    decision: Literal["PAY_FROM_BALANCE", "PAY_WITH_ADVANCE", "PARTIAL_PAYMENT"]
+    safe_settlement_limit: float
     recommended_micro_settlement: float
+    advance_amount: float
+    unpaid_amount: float
+    evening_forecast_expected: float
+    evening_forecast_floor: float
+    projected_eod_balance: float  # unsettled balance left after settling now (still covers the EMI)
     instant_fee: float
-    avoided_penalty_fees: float
     action_deep_link: str
     p4b_notification_payload: Dict[str, Any]
 
@@ -277,98 +288,51 @@ async def create_sandbox_payment(req: SandboxPaymentRequest):
 # -------------------------------------------------------------
 # ENDPOINT 2: DETERMINISTIC LIQUIDITY SIMULATION & EMI GUARD
 # -------------------------------------------------------------
+@lru_cache(maxsize=1)
+def get_forecaster() -> Forecaster:
+    """Loads the evening-revenue model once per process."""
+    return Forecaster.load()
+
+def _notification_text(plan: Dict[str, Any], vendor: str, emi: float) -> str:
+    if plan["decision"] == "PAY_FROM_BALANCE":
+        return f"Tap to settle ₹{plan['settle_now_amount']:,.2f} and pay {vendor}. ₹{emi:,.2f} stays reserved for tomorrow's EMI."
+    if plan["decision"] == "PAY_WITH_ADVANCE":
+        return (f"Pay {vendor} now: ₹{plan['settle_now_amount']:,.2f} from your balance + a ₹{plan['advance_amount']:,.2f} advance, "
+                f"repaid from tonight's sales. Your ₹{emi:,.2f} EMI stays covered. Tap to accept.")
+    return (f"You can safely pay {vendor} ₹{plan['settle_now_amount']:,.2f} now. Paying more would put tomorrow's "
+            f"₹{emi:,.2f} EMI at risk; ask them to collect ₹{plan['unpaid_amount']:,.2f} later.")
+
 @app.post("/api/v1/liquidity/simulate", response_model=LiquiditySimulateResponse)
 async def simulate_liquidity(req: LiquiditySimulateRequest):
     """
-    Deterministic mathematical assertion:
-    (Requested_Settlement + Daily_Loan_EMI) <= Current_Unsettled_Balance
-    Guarantees zero AI math hallucinations, preventing morning EMI loan defaults.
+    Plans a supplier payment without ever touching the EMI reserve.
+    The balance comes from the ledger (not the caller). The LSTM forecast of tonight's sales is
+    only used through its conservative floor, to size an optional short advance.
     """
+    merchant = MERCHANT_DATABASE.get(req.merchant_id)
+    if not merchant:
+        raise HTTPException(status_code=404, detail="Merchant MID not found.")
     OBSERVABILITY_METRICS["liquidity_simulations_count"] += 1
-    merchant = MERCHANT_DATABASE.get(req.merchant_id, MERCHANT_DATABASE["HelloM8xxxxxxxx45"])
 
-    current_balance = float(req.current_unsettled_balance)
-    requested = float(req.due_amount)
-    daily_emi = float(merchant["daily_loan_emi"])
-    
-    import os
-    import torch
-    import torch.nn as nn
-    import numpy as np
-    import pickle
-    from sklearn.preprocessing import MinMaxScaler
+    balance = float(merchant["current_unsettled_balance"])
+    emi = float(merchant["daily_loan_emi"])
+    try:
+        history = merchant["sales_history"]
+        forecast = get_forecaster().predict(history["past_days"], history["today_morning"])
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail=f"Forecaster unavailable: {exc}")
 
-    # Define model structure for loading weights
-    class LiquidityLSTM(nn.Module):
-        def __init__(self, input_size):
-            super(LiquidityLSTM, self).__init__()
-            self.lstm = nn.LSTM(input_size, hidden_size=16, batch_first=True)
-            self.fc1 = nn.Linear(16, 8)
-            self.relu = nn.ReLU()
-            self.fc2 = nn.Linear(8, 1)
-            
-        def forward(self, x):
-            out, _ = self.lstm(x)
-            out = self.fc1(out[:, -1, :])
-            out = self.relu(out)
-            out = self.fc2(out)
-            return out
+    plan = plan_supplier_payment(balance, req.due_amount, emi, forecast.floor, merchant["advance_limit"])
+    strict_ok = req.due_amount + emi <= balance
+    if not strict_ok:
+        OBSERVABILITY_METRICS["emi_breaches_prevented_count"] += 1
 
-    # Load the trained LSTM model
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    model_path = os.path.join(base_dir, "models", "lstm_model.pth")
-    scaler_x_path = os.path.join(base_dir, "models", "scaler_X.pkl")
-    scaler_y_path = os.path.join(base_dir, "models", "scaler_y.pkl")
+    # Nominal instant settlement fee (0.10% capped at ₹5)
+    instant_fee = round(min(5.0, plan["settle_now_amount"] * 0.0010), 2)
 
-    predicted_evening_sales = 0.0
-    if os.path.exists(model_path):
-        with open(scaler_x_path, "rb") as f:
-            scaler_X = pickle.load(f)
-        with open(scaler_y_path, "rb") as f:
-            scaler_y = pickle.load(f)
-            
-        model = LiquidityLSTM(input_size=7)
-        model.load_state_dict(torch.load(model_path))
-        model.eval()
-        
-        # Synthetic merchant history vector (7 features): 
-        # [Day-3 M, Day-3 E, Day-2 M, Day-2 E, Day-1 M, Day-1 E, Today M]
-        dummy_history = np.array([[12000, 18000, 12500, 18200, 11800, 17500, 11000]])
-        dummy_scaled = scaler_X.transform(dummy_history)
-        dummy_tensor = torch.tensor(dummy_scaled.reshape(1, 1, 7), dtype=torch.float32)
-        
-        with torch.no_grad():
-            pred_scaled = model(dummy_tensor).numpy()
-            predicted_evening_sales = float(scaler_y.inverse_transform(pred_scaled)[0][0])
-    else:
-        # Fallback if model not trained yet
-        predicted_evening_sales = 8450.00
-
-    # DEEP LEARNING ASSERTION
-    # Instead of just (requested + emi) <= current_balance
-    # We include predicted future earnings!
-    total_projected_liquidity = current_balance + predicted_evening_sales
-    assertion_passed = (requested + daily_emi) <= total_projected_liquidity
-
-    if assertion_passed:
-        recommended = requested
-        # Even though we predict evening sales, we still deduct from current balance. 
-        # If current balance goes negative, it's covered by Paytm working capital float.
-        projected_eod = (current_balance - requested) + predicted_evening_sales
-        OBSERVABILITY_METRICS["loan_defaults_prevented_count"] += 1
-        avoided_penalty = 750.00 # Standard bounce fee avoided
-    else:
-        # Max safe settlement without defaulting EMI
-        recommended = max(0.0, total_projected_liquidity - daily_emi)
-        projected_eod = (current_balance - recommended) + predicted_evening_sales
-        avoided_penalty = 0.0
-
-    # Calculate nominal instant settlement fee (0.10% capped at ₹5)
-    instant_fee = round(min(5.0, recommended * 0.0010), 2)
-
-    # Construct P4B Mini-App Deep Link with Base64 payload
     payload_data = {
-        "params": f"amount={recommended}&vendor=amul_distributor&emi_reserved={daily_emi}",
+        "params": (f"amount={plan['settle_now_amount']}&advance={plan['advance_amount']}"
+                   f"&vendor={req.vendor_id}&emi_reserved={emi}"),
         "path": "/micro-settlement-approval"
     }
     encoded_data = base64.b64encode(json.dumps(payload_data).encode("utf-8")).decode("utf-8")
@@ -377,8 +341,8 @@ async def simulate_liquidity(req: LiquiditySimulateRequest):
     notification_payload = {
         "notification_type": "LIQUIDITY_OPTIMIZATION_PROMPT",
         "merchant_id": merchant["mid"],
-        "title": "Amul Distributor Payment Due",
-        "body": f"Tap to instantly settle ₹{recommended:,.2f} and pay the distributor. Your remaining ₹{projected_eod:,.2f} will automatically cover tomorrow's ₹{daily_emi:,.2f} EMI deduction.",
+        "title": f"Supplier payment due: ₹{req.due_amount:,.2f}",
+        "body": _notification_text(plan, req.vendor_id, emi),
         "action_deep_link": action_deep_link,
         "expiry_timestamp": int(time.time()) + 3600,
         "priority": "HIGH"
@@ -387,14 +351,20 @@ async def simulate_liquidity(req: LiquiditySimulateRequest):
 
     return LiquiditySimulateResponse(
         merchant_id=merchant["mid"],
-        current_unsettled_balance=current_balance,
-        requested_settlement=requested,
-        daily_loan_emi=daily_emi,
-        assertion_passed=assertion_passed,
-        projected_eod_balance=projected_eod,
-        recommended_micro_settlement=recommended,
+        current_unsettled_balance=balance,
+        requested_settlement=req.due_amount,
+        daily_loan_emi=emi,
+        advance_limit=merchant["advance_limit"],
+        assertion_passed=strict_ok,
+        decision=plan["decision"],
+        safe_settlement_limit=plan["safe_settlement_limit"],
+        recommended_micro_settlement=plan["settle_now_amount"],
+        advance_amount=plan["advance_amount"],
+        unpaid_amount=plan["unpaid_amount"],
+        evening_forecast_expected=forecast.expected,
+        evening_forecast_floor=forecast.floor,
+        projected_eod_balance=round(balance - plan["settle_now_amount"], 2),
         instant_fee=instant_fee,
-        avoided_penalty_fees=avoided_penalty,
         action_deep_link=action_deep_link,
         p4b_notification_payload=notification_payload
     )
@@ -564,7 +534,7 @@ async def get_observability_metrics():
             "spoof_attacks_neutralized": OBSERVABILITY_METRICS["spoofs_detected_count"],
             "audio_delayed_calming_alerts": OBSERVABILITY_METRICS["lagged_audio_alerts_count"],
             "liquidity_simulations": OBSERVABILITY_METRICS["liquidity_simulations_count"],
-            "loan_emi_defaults_prevented": OBSERVABILITY_METRICS["loan_defaults_prevented_count"],
+            "emi_breaches_prevented": OBSERVABILITY_METRICS["emi_breaches_prevented_count"],
             "total_capital_settled_inr": OBSERVABILITY_METRICS["total_settled_amount"],
             "avg_spoof_guard_latency_ms": round(avg_latency, 2),
             "p95_spoof_guard_latency_ms": p95_latency,
