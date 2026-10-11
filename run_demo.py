@@ -15,6 +15,7 @@ import httpx
 from colorama import Fore, Style, init
 
 import config
+from mock_backend.sandbox_client import create_payment
 
 # Fix Windows console encoding for Unicode/ANSI
 if sys.platform == "win32":
@@ -28,6 +29,10 @@ if sys.platform == "win32":
 init(autoreset=True)
 
 BACKEND_URL = config.BACKEND_URL
+DEVICE_IMEI = "864201938472910"
+
+def sla_label(result: dict) -> str:
+    return f"{Fore.GREEN}MET" if result.get("sla_met") else f"{Fore.RED}MISSED"
 
 def print_header(title: str):
     print("\n" + "=" * 78)
@@ -79,11 +84,11 @@ async def main():
     t0 = time.time()
     fake_result = await supervisor.handle_soundbox_event(
         txn_id="TXN_FAKE_SPOOF_778",
-        device_imei="864201938472910"
+        device_imei=DEVICE_IMEI
     )
     t_fake_ms = int((time.time() - t0) * 1000)
 
-    print(f"  * Latency: {Fore.CYAN}{t_fake_ms}ms {Fore.WHITE}(SLA Budget: <600ms - {Fore.GREEN}PASSED{Fore.WHITE})")
+    print(f"  * Latency: {Fore.CYAN}{t_fake_ms}ms {Fore.WHITE}(SLA budget 600ms: {sla_label(fake_result)}{Fore.WHITE})")
     print(f"  * Gateway Hash Match: {Fore.RED}{fake_result['gateway_hash_matched']}")
     print(f"  * Decision: {Fore.RED}{Style.BRIGHT}{fake_result['status']}")
     print(f"  * Message: {Fore.YELLOW}{fake_result['message']}")
@@ -93,18 +98,20 @@ async def main():
 
     # Scenario 1B: Legitimate Payment suffering 2G MQTT Cellular Latency
     print_step("SCENARIO 1B", "Legitimate Payment with 2G Cellular MQTT Drop")
-    print(f"{Fore.WHITE}Customer pays Rs. 50.00 (TXN_9876543210). Gateway cleared, but Soundbox is silent.")
+    payment = await create_payment(50.00, DEVICE_IMEI, mqtt_delivered=False, backend_url=BACKEND_URL)
+    print(f"{Fore.WHITE}Customer pays Rs. 50.00 ({payment['txn_id']}). Gateway cleared, but Soundbox is silent.")
     print(f"{Fore.MAGENTA}2G network dropped MQTT QoS 1 PUBACK packet. Soundbox buffering...")
     print(f"{Fore.WHITE}Spoof Guard Agent inspecting broker telemetry and gateway switch...")
 
     t1 = time.time()
     legit_result = await supervisor.handle_soundbox_event(
-        txn_id="TXN_9876543210",
-        device_imei="864201938472910"
+        txn_id=payment["txn_id"],
+        device_imei=DEVICE_IMEI,
+        claimed_amount=50.00
     )
     t_legit_ms = int((time.time() - t1) * 1000)
 
-    print(f"  * Latency: {Fore.CYAN}{t_legit_ms}ms {Fore.WHITE}(SLA Budget: <600ms - {Fore.GREEN}PASSED{Fore.WHITE})")
+    print(f"  * Latency: {Fore.CYAN}{t_legit_ms}ms {Fore.WHITE}(SLA budget 600ms: {sla_label(legit_result)}{Fore.WHITE})")
     print(f"  * Gateway Hash Match: {Fore.GREEN}{legit_result['gateway_hash_matched']}")
     print(f"  * MQTT PUBLISH Detected: {Fore.GREEN}{legit_result['mqtt_publish_detected']}")
     print(f"  * Soundbox PUBACK Received: {Fore.YELLOW}{legit_result['puback_received']} (Buffering over 2G)")
@@ -113,6 +120,19 @@ async def main():
     print(f"    \"{Fore.WHITE}Payment of Rs. 50 Received. Soundbox audio delayed due to network.{Fore.GREEN}\"")
     print(f"  {Fore.GREEN}[OK] Neutralized merchant anxiety in real time; customer allowed to leave safely.")
     assert legit_result["status"] == "AUDIO_DELAYED", "Expected AUDIO_DELAYED!"
+    time.sleep(1)
+
+    # Scenario 1C: the same genuine receipt re-used to claim a bigger amount
+    print_step("SCENARIO 1C", "Real Receipt, Tampered Amount (Replay Attack)")
+    print(f"{Fore.WHITE}Fraudster shows the genuine Rs. 50 receipt edited to read Rs. 500.")
+    replay_result = await supervisor.handle_soundbox_event(
+        txn_id=payment["txn_id"],
+        device_imei=DEVICE_IMEI,
+        claimed_amount=500.00
+    )
+    print(f"  * Decision: {Fore.RED}{Style.BRIGHT}{replay_result['status']}")
+    print(f"  * Reason: {Fore.YELLOW}{replay_result['message']}")
+    assert replay_result["status"] == "SPOOF_DETECTED", "Expected the tampered amount to be caught!"
     time.sleep(1)
 
     # =========================================================================
@@ -214,8 +234,8 @@ async def main():
     print(f"  * Loan EMI Defaults Prevented:      {Fore.GREEN}{metrics['loan_emi_defaults_prevented']}")
     print(f"  * Total Capital Settled:            {Fore.GREEN}Rs. {metrics['total_capital_settled_inr']:,.2f}")
     print(f"  * Average Spoof Guard Latency:      {Fore.CYAN}{metrics['avg_spoof_guard_latency_ms']}ms ({metrics['latency_sla_compliance']})")
-    print(f"  * PII Leakage Events:               {Fore.GREEN}{metrics['pii_leakage_events']} (Zero Leakage)")
-    print(f"  * AI Math Hallucinations:           {Fore.GREEN}{metrics['math_calculation_hallucinations']} (Zero Hallucination)")
+    print(f"  * p95 Spoof Guard Latency:          {Fore.CYAN}{metrics['p95_spoof_guard_latency_ms']}ms")
+    print(f"  * PII Reaching Backend Unredacted:  {Fore.GREEN}{metrics['pii_leakage_events']}")
 
     print("\n" + "=" * 78)
     print(f"{Fore.GREEN}{Style.BRIGHT}{'*** ALL 3-MINUTE HACKATHON DEMO ASSERTIONS PASSED! ***'.center(78)}")
