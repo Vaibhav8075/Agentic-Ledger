@@ -1,0 +1,42 @@
+{
+  "dataset": "datasets/synthetic_sales_data_400k.csv (synthetic, Kaggle); 20 Region-and-Sales-Rep series",
+  "caveat": "Morning/evening split is synthetic (dataset has no time of day). Not evidence of real-merchant performance.",
+  "split": {
+    "train_before": "2024-05-26",
+    "val_before": "2024-09-12",
+    "samples": {
+      "train": 10160,
+      "val": 2180,
+      "test": 2200
+    }
+  },
+  "test": {
+    "lstm": {
+      "mae_inr": 184363.98,
+      "mape_pct": 16.9,
+      "r2": 0.454
+    },
+    "baseline_mean_of_last_3_evenings": {
+      "mae_inr": 293512.23,
+      "mape_pct": 28.2,
+      "r2": -0.3578
+    },
+    "baseline_morning_times_past_evening_ratio": {
+      "mae_inr": 230100.45,
+      "mape_pct": 20.16,
+      "r2": 0.08
+    },
+    "baseline_past_mean_total_minus_morning": {
+      "mae_inr": 465627.1,
+      "mape_pct": 44.95,
+      "r2": -2.3613
+    }
+  },
+  "floor": {
+    "quantile": 0.1,
+    "ratio_to_expected": 0.7608,
+    "test_coverage_pct": 88.68
+  },
+  "best_val_mse_relative": 0.015639,
+  "seed": 42
+}
