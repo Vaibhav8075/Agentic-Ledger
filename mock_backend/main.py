@@ -15,6 +15,8 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request, Response, st
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+import config
+
 app = FastAPI(
     title="Paytm Vyapar Saathi Production Mock Backend",
     description="Mock backend simulating Paytm Payment Gateway, Soundbox 2G MQTT broker, and Paytm Settlement APIs for Phinite Agent Graph.",
@@ -36,7 +38,7 @@ MERCHANT_DATABASE = {
     "HelloM8xxxxxxxx45": {
         "mid": "HelloM8xxxxxxxx45",
         "merchant_name": "Sharma General Store & Dairy",
-        "secret_key": "secret_merchant_key_prod_09a7b",
+        "secret_key": config.MERCHANT_SIGNING_KEY,
         "device_imei": "864201938472910",
         "current_unsettled_balance": 12000.00,
         "daily_loan_emi": 3000.00,

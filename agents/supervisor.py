@@ -6,13 +6,15 @@ and executes cryptographically signed Paytm settlement actions.
 
 import httpx
 from typing import Any, Dict, Optional
+
+import config
 from agents.spoof_guard import SpoofGuardAgent
 from agents.supplier_ledger import SupplierLedgerAgent
 from agents.liquidity_engine import LiquidityEngineAgent
 from agents.guardrails import sign_paytm_request
 
 class MasterSupervisorAgent:
-    def __init__(self, backend_url: str = "http://127.0.0.1:8000"):
+    def __init__(self, backend_url: str = config.BACKEND_URL):
         self.backend_url = backend_url
         self.name = "MasterSupervisorOrchestrator"
 
@@ -38,7 +40,7 @@ class MasterSupervisorAgent:
         current_unsettled_balance: float,
         due_amount: float,
         cutoff_time: str,
-        merchant_id: str = "HelloM8xxxxxxxx45"
+        merchant_id: str = config.DEMO_MERCHANT_ID
     ) -> Dict[str, Any]:
         """
         Dispatches to Worker 3 (Liquidity Engine) for EMI assertion.
@@ -70,8 +72,7 @@ class MasterSupervisorAgent:
         }
 
         # Generate HMAC-SHA256 signature
-        secret_key = "secret_merchant_key_prod_09a7b"
-        auth_head = sign_paytm_request(payload, secret_key)
+        auth_head = sign_paytm_request(payload, config.MERCHANT_SIGNING_KEY)
         headers = {
             "X-Paytm-Signature": auth_head["signature"],
             "X-Idempotency-Key": f"IDEMP_MICRO_{int(auth_head['timestamp'])}"

@@ -14,6 +14,8 @@ import time
 import httpx
 from colorama import Fore, Style, init
 
+import config
+
 # Fix Windows console encoding for Unicode/ANSI
 if sys.platform == "win32":
     try:
@@ -25,7 +27,7 @@ if sys.platform == "win32":
 # Enable ANSI colors
 init(autoreset=True)
 
-BACKEND_URL = "http://127.0.0.1:8000"
+BACKEND_URL = config.BACKEND_URL
 
 def print_header(title: str):
     print("\n" + "=" * 78)

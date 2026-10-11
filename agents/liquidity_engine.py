@@ -6,10 +6,12 @@ Enforces deterministic balance calculation and Maker-Checker guardrail:
 
 import httpx
 from typing import Any, Dict
+
+import config
 from agents.guardrails import assert_liquidity_guardrail
 
 class LiquidityEngineAgent:
-    def __init__(self, backend_url: str = "http://127.0.0.1:8000"):
+    def __init__(self, backend_url: str = config.BACKEND_URL):
         self.backend_url = backend_url
         self.name = "LiquidityEngineWorker"
 
@@ -18,7 +20,7 @@ class LiquidityEngineAgent:
         current_unsettled_balance: float,
         due_amount: float,
         cutoff_time: str,
-        merchant_id: str = "HelloM8xxxxxxxx45"
+        merchant_id: str = config.DEMO_MERCHANT_ID
     ) -> Dict[str, Any]:
         """
         Executes deterministic liquidity projection via the mock backend.

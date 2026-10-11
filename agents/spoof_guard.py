@@ -8,8 +8,10 @@ import time
 import httpx
 from typing import Any, Dict
 
+import config
+
 class SpoofGuardAgent:
-    def __init__(self, backend_url: str = "http://127.0.0.1:8000"):
+    def __init__(self, backend_url: str = config.BACKEND_URL):
         self.backend_url = backend_url
         self.name = "SpoofGuardWorker"
         self.latency_budget_ms = 600
