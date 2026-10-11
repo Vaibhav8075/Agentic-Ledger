@@ -1,64 +1,145 @@
 # Paytm Vyapar Saathi
 **Track 2: AI for Small Businesses | Agent Labs Buildathon (Phinite x Paytm)**
 
-## Elevator Pitch
-Paytm Vyapar Saathi is an autonomous multi-agent system built on the Phinite OS. It acts as an invisible guardian and financial manager for small retail merchants (SMBs). It intercepts Soundbox payment fraud in real-time and uses Deep Learning (PyTorch LSTM) to predict a merchant's future evening revenue, dynamically underwriting instant micro-loans so they can pay suppliers even when their current bank balance is zero.
+A multi-agent assistant for small Paytm merchants. It handles two everyday moments where a
+merchant's trust in digital payments breaks down: a customer says they have paid but the Soundbox
+stays silent, and a supplier wants money at 4 PM while tomorrow's loan EMI still has to be covered.
 
 ---
 
-## The Problems We Are Solving
+## The two problems
 
-Most Fintech happy-paths break in the real world. We are solving two critical edge cases for the everyday Paytm merchant:
+1. **Silent Soundbox or fake payment?** On a weak 2G link the Soundbox can announce a genuine payment
+   seconds late. Fraudsters exploit the same moment with fake payment apps, old receipts, or a real
+   receipt with the amount edited. The merchant has to decide on the spot.
+2. **The 16:00 supplier bill.** The distributor wants ₹4,500 now. The merchant has ₹6,000 of today's
+   collections still unsettled, and a ₹3,000 loan EMI is deducted from the next morning's settlement
+   batch. Settling everything on demand pays the supplier but bounces the EMI.
 
-1. **The Spoof & Lag Problem (Security & Trust):** 
-   When a customer pays but the Soundbox remains silent due to network congestion or 4G signal drops, the merchant panics, thinking the customer is using a fake "Spoof" app.
-2. **The 4:00 PM Liquidity Crunch (Cashflow):** 
-   A merchant has INR 0 in their bank account at 4 PM, but the FMCG distributor (e.g., Amul) is standing at their shop demanding INR 4,500 for milk crates. The merchant has a Paytm loan EMI due the next morning, meaning their funds are locked. A traditional banking algorithm would block the payment, forcing the merchant to lose their inventory.
+## How it works
 
----
+```
+        payment claim / WhatsApp bill / settlement tap
+                            │
+                 ┌──────────▼───────────┐
+                 │  Master Supervisor   │  routes events, keeps an audit trail
+                 └──┬────────┬───────┬──┘
+        ┌───────────┘        │       └──────────────┐
+┌───────▼────────┐  ┌────────▼────────┐  ┌──────────▼─────────┐
+│  Spoof Guard   │  │ Supplier Ledger │  │  Liquidity Engine  │
+│ gateway + MQTT │  │ PII mask + bill │──▶ EMI-safe payment   │
+│ checks         │  │ extraction      │  │ plan + maker-check │
+└────────────────┘  └─────────────────┘  └──────────┬─────────┘
+                                                    │ merchant approves
+                                         ┌──────────▼─────────┐
+                                         │ Signed, idempotent │
+                                         │ settlement         │
+                                         └────────────────────┘
+```
 
-## Our Solution: The Multi-Agent Architecture
+| Agent | What it does | Code |
+|---|---|---|
+| Supervisor | One entry point (`handle_event`) for payment claims, bills and settlement taps; records every outcome | `agents/supervisor.py` |
+| Spoof Guard | A claim is genuine only if the payment exists on the gateway, went to *this* Soundbox's merchant, is recent, and matches the amount on the customer's screen. Genuine but unacknowledged (no MQTT PUBACK) → "payment received, audio delayed" | `agents/spoof_guard.py`, `mock_backend/main.py` |
+| Supplier Ledger | Masks card, Aadhaar, phone, bank account, PAN, IFSC and UPI IDs, then extracts total, vendor, invoice number, deadline and quantities. Any extracted amount that is not in the message text is rejected | `agents/supplier_ledger.py`, `agents/invoice_parser.py` |
+| Liquidity Engine | Builds the payment plan below and re-checks it independently before anything is paid | `agents/liquidity_engine.py`, `agents/guardrails.py` |
 
-We solved this using a Swarm of 4 Phinite Agents working together in the background, communicating with a custom FastAPI backend and a PyTorch Deep Learning model.
+### The payment plan
 
-### 1. Master Supervisor Agent (The Router)
-- **Role:** Ingests real-time events (Soundbox MQTT telemetry pings, incoming WhatsApp Webhook messages).
-- **Logic:** Decides whether the event is a security issue (routes to Spoof Guard) or a financial issue (routes to Supplier Ledger).
+The EMI reserve is never touched. For a bill of `due`:
 
-### 2. Spoof Guard Agent (The Guardian)
-- **Role:** Analyzes transaction hashes in under 200ms.
-- **Logic:** 
-  - If a customer flashes a fake payment app, it instantly detects the missing gateway hash and pushes a FRAUD ALERT to the merchant's phone.
-  - If it's a real payment but the 4G network is lagging/congested, it checks the broker telemetry, confirms the payment is mathematically secure, and pushes a "Payment Safe, Audio Delayed" notification to calm the merchant.
+1. **Pay from balance** if `due ≤ balance − EMI`.
+2. **Pay with an advance** otherwise, settling `balance − EMI` now and covering the gap with a short
+   advance, but only if the gap fits both a pre-approved limit and the *conservative floor* of the
+   forecast of tonight's sales (those sales repay the advance in the next settlement batch).
+3. **Partial payment** otherwise: pay what is safe and tell the merchant how much to defer.
 
-### 3. Supplier Ledger Agent (The Data Extractor)
-- **Role:** Processes unstructured vendor bills (e.g., a WhatsApp message from the Amul distributor).
-- **Logic:** Uses Phinite-compliant guardrails to redact/mask sensitive PII (like bank account numbers), extracts the total liability (INR 4,500), and passes it to the Liquidity Engine.
+The forecast never approves anything by itself. In the demo the ₹4,500 Amul bill becomes
+₹3,000 from the balance plus a ₹1,500 advance, and ₹3,000 stays for the EMI.
 
-### 4. Liquidity Engine Agent (The Deep Learning Brain)
-- **Role:** Evaluates merchant cash-flow risk.
-- **Logic:** Instead of using rigid subtraction logic (Balance - Bill = Denied), it connects to our custom PyTorch LSTM Neural Network. The AI looks at the merchant's transaction velocity and predicts they will earn INR 8,450 during tonight's evening rush. Because the AI mathematically guarantees future revenue, the agent auto-approves the Amul payment instantly, saving the merchant's business.
+### Settlement safety
 
----
+- Requests are signed with HMAC-SHA256 over the exact bytes sent plus a timestamp; forged, edited or
+  stale requests are rejected.
+- Each payout has one order ID and one idempotency key, reused on every retry, so a retry can never pay twice.
+- After a bank timeout (504) the supervisor first asks for the order's status (the sandbox stand-in
+  for an NPCI UDIR check) and only resends the identical request if the order never arrived.
 
-## Tech Stack & Technical Details
-- **Orchestration:** Phinite OS Visual Agent Graph
-- **Deep Learning:** PyTorch (LSTM trained on 400,000 rows of Kaggle retail data with Sklearn MinMax scaling).
-- **Backend Simulation:** FastAPI & Uvicorn (Handles Bank 504 timeouts, Idempotency, and Double-Debit protection).
-- **Frontend / Demo:** Streamlit (Simulates the Merchant's Paytm for Business mobile app).
-- **Infrastructure:** Fully containerized using Docker & Docker-Compose.
+## Forecaster results
 
----
+The Liquidity Engine's PyTorch LSTM predicts sales from 16:00 to midnight from the last three days'
+morning/evening sales and today's morning sales. Inputs are divided by the merchant's recent daily
+average, so one model works for a small kirana and a large distributor.
 
-## How to Run the System
+Test period (last 15% of dates, held out; 2,200 samples), from `models/metrics.json`:
 
-**Production Environment (Docker)**
-1. Open terminal in the root directory.
-2. Run `docker-compose up --build`
-3. Access the dashboard at `http://localhost:8501`.
+| Model | MAE (₹) | MAPE | R² |
+|---|---:|---:|---:|
+| **LSTM** | **1,84,364** | **16.9%** | **0.454** |
+| Today's morning × recent evening/morning ratio | 2,30,100 | 20.2% | 0.080 |
+| Mean of the last 3 evenings | 2,93,512 | 28.2% | −0.358 |
+| Recent daily average − today's morning | 4,65,627 | 45.0% | −2.361 |
 
-**Local Development (Python)**
-1. Install dependencies: `pip install -r requirements.txt`
-2. Start the Backend API: `start_backend.bat`
-3. Start the Frontend UI: `streamlit run streamlit_app.py`
-4. Access the dashboard at `http://localhost:8501`.
+The conservative floor is 0.761 × the forecast (10th percentile of actual/forecast on the
+validation period); actual evening sales were at or above it on 88.7% of test days.
+
+**Read these numbers with care.** The training data is a synthetic retail sales dataset with no
+time of day, so the morning/evening split is simulated (each day's morning share is drawn from
+N(0.40, 0.05)). The table shows that the pipeline is sound and beats simple baselines on held-out
+data; it says nothing about real merchants. Real Paytm transaction histories would be needed for that.
+Reproduce with `python scripts/train_lstm.py` (seeded, about 10 seconds on CPU).
+
+> An earlier version of this repository reported "94% validation accuracy". That figure came from a
+> formula that capped the printed value between 92.5% and 94.8%, with no validation split, and has been
+> withdrawn together with the model it described.
+
+## What is real and what is simulated
+
+| Part | Status |
+|---|---|
+| Spoof checks, payment plan, maker-checker, PII masking, bill extraction, signing, idempotency | Real logic, covered by tests |
+| Forecaster | Real model and evaluation; synthetic morning/evening split (see above) |
+| Paytm gateway, Soundbox MQTT telemetry, settlement API, NPCI UDIR status | Simulated by the FastAPI sandbox in `mock_backend/` |
+| LLM agents in `phinite_schemas/agent_graph.yaml` | Specification for Phinite; not executed in this repo. The rule-based extractor and `validate_extraction` are the offline path and the checker for an LLM extractor |
+| Advance / credit decision | Mock limit; a real advance needs Paytm Lending approval and merchant consent |
+
+## Run it
+
+```bash
+pip install -r requirements-dev.txt
+
+# 1. Backend (sandbox gateway + agents' API)
+python -m uvicorn mock_backend.main:app --port 8000      # or start_backend.bat
+
+# 2a. Terminal demo
+python run_demo.py                                        # or run_demo.bat
+
+# 2b. Live merchant app
+streamlit run streamlit_app.py                            # http://localhost:8501
+
+# Tests (no server needed)
+python -m pytest -q
+```
+
+With Docker: `docker compose up --build`, then open http://localhost:8501.
+
+Settings come from environment variables (see `.env.example`): `VS_BACKEND_URL`, `VS_MERCHANT_ID`
+and `VS_MERCHANT_SIGNING_KEY`. The default signing key only works against the local sandbox.
+
+## Project layout
+
+```
+agents/           supervisor, three workers, guardrails (PII, payment plan, signing), bill parser
+ml/forecaster.py  LSTM model, scale-free features, loading and prediction
+mock_backend/     FastAPI sandbox (gateway, telemetry, settlement, notifications, metrics)
+scripts/          train_lstm.py
+models/           evening_lstm.pt and metrics.json
+phinite_schemas/  Phinite agent graph and tool schemas
+tests/            pytest suite (backend, agents, parser, forecaster)
+submission/       pitch script and deck generator
+```
+
+## Data
+
+`datasets/synthetic_sales_data_400k.csv`: a synthetic retail sales dataset (400,000 rows, 2023–2024)
+downloaded from Kaggle. Each of its 20 region-and-sales-rep combinations is treated as one merchant.
