@@ -1,17 +1,16 @@
-FROM python:3.10-slim
+FROM python:3.11-slim
 
 WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 
-# Install dependencies
+# CPU-only PyTorch keeps the image small; the forecaster does not need a GPU
 COPY requirements.txt .
-RUN pip install --default-timeout=2000 --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu "torch>=2.2.0" \
+ && pip install --no-cache-dir -r requirements.txt
 
-# Copy all project files
 COPY . .
+RUN useradd --create-home appuser
+USER appuser
 
-# Expose ports for FastAPI and Streamlit
-EXPOSE 8000
-EXPOSE 8501
-
-# The start command is handled by docker-compose
-CMD ["bash"]
+EXPOSE 8000 8501
+CMD ["uvicorn", "mock_backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
