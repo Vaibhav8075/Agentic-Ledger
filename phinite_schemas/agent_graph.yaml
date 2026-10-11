@@ -9,7 +9,7 @@ metadata:
 # Runtime Environment Variables & Secret Bindings
 environment:
   PAYTM_MID: "HelloM8xxxxxxxx45"
-  PAYTM_MERCHANT_KEY: "secret_merchant_key_prod_09a7b"
+  PAYTM_MERCHANT_KEY: ""  # inject from the platform secret store at deploy time; never commit a key
   PAYTM_SETTLEMENT_ENDPOINT: "https://secure.paytmpayments.com/merchant-settlement/SettlementOrderDetail"
   SOUNDBOX_MQTT_BROKER: "ssl://iot-mqtt.paytm.com:8883"
   SPOOF_GUARD_LATENCY_BUDGET_MS: 600
