@@ -81,19 +81,25 @@ nodes:
   - id: "pii_redaction_guardrail"
     type: "script_node"
     runtime: "python3.11"
-    description: "Masks PAN, Bank Account Numbers, and IFSC codes before LLM consumption."
+    description: "Masks card, Aadhaar, phone, bank account, PAN, IFSC and VPA before LLM consumption (same patterns as agents/guardrails.py)."
     code: |
       import re
+      PII_PATTERNS = [
+          ("[REDACTED_CARD]", r"\b(?:\d{4}[ -]){3}\d{4}\b"),
+          ("[REDACTED_AADHAAR]", r"\b[2-9]\d{3}[ -]?\d{4}[ -]?\d{4}\b"),
+          ("[REDACTED_PHONE]", r"(?:\+91[ -]?)?\b[6-9]\d{4}[ -]?\d{5}\b"),
+          ("[REDACTED_BANK_ACC]", r"\b\d{9,18}\b"),
+          ("[REDACTED_PAN]", r"\b[A-Z]{5}[0-9]{4}[A-Z]\b"),
+          ("[REDACTED_IFSC]", r"\b[A-Z]{4}0[A-Z0-9]{6}\b"),
+          ("[REDACTED_VPA]", r"\b[\w.-]+@[\w-]+(?:\.[\w-]+)*\b"),
+      ]
       def sanitize(payload):
           text = str(payload.get("raw_text", ""))
-          # Mask 10-digit PAN
-          text = re.sub(r'[A-Z]{5}[0-9]{4}[A-Z]{1}', '[REDACTED_PAN]', text)
-          # Mask 9-18 digit Bank Account Numbers
-          text = re.sub(r'\b\d{9,18}\b', '[REDACTED_ACC_NUM]', text)
-          # Mask 11-char IFSC
-          text = re.sub(r'^[A-Z]{4}0[A-Z0-9]{6}$', '[REDACTED_IFSC]', text)
+          original = text
+          for label, pattern in PII_PATTERNS:
+              text = re.sub(pattern, label, text)
           payload["raw_text"] = text
-          payload["pii_sanitized"] = True
+          payload["pii_sanitized"] = text != original
           return payload
 
   # -------------------------------------------------------------
@@ -189,13 +195,16 @@ nodes:
     type: "tool_node"
     tool: "execute_targeted_micro_settlement"
     pre_execution_script: |
-      import hmac, hashlib, time
-      def generate_paytm_checksum(payload, secret_key):
-          body_str = str(payload["body"])
+      import hashlib, hmac, json, time
+      def sign_request(body, secret_key):
+          # Sign the exact bytes sent (canonical JSON) plus the timestamp, as agents/guardrails.py does.
+          # The caller generates order_id once and reuses it, and the idempotency key, on every retry.
+          raw = json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
           ts = str(int(time.time()))
-          signature = hmac.new(secret_key.encode('utf-8'), (body_str + ts).encode('utf-8'), hashlib.sha256).hexdigest()
-          payload["head"] = {"signature": signature, "timestamp": ts}
-          return payload
+          signature = hmac.new(secret_key.encode("utf-8"), raw + ts.encode("utf-8"), hashlib.sha256).hexdigest()
+          headers = {"X-Paytm-Signature": signature, "X-Paytm-Timestamp": ts,
+                     "X-Idempotency-Key": "IDEMP_" + body["order_id"]}
+          return raw, headers
     error_handler:
       on_http_504: "npci_udir_idempotent_poller"
 
@@ -205,18 +214,17 @@ nodes:
   - id: "npci_udir_idempotent_poller"
     type: "script_node"
     runtime: "python3.11"
-    description: "Handles bank switch 504 timeouts via idempotent UDIR reconciliation polling without double-debit."
+    description: "After a 504, asks the switch for the order's status instead of paying again; retries only with the same idempotency key."
     code: |
       import time
-      def poll_udir_status(order_id, idempotency_key):
-          # Query NPCI UDIR switch state
-          # Codes: TCC102 / TCC103 handle delayed credit reconciliation
-          return {
-              "order_id": order_id,
-              "idempotency_key": idempotency_key,
-              "recon_status": "LOCKED_IN_SWITCH_RECONCILIATION",
-              "action": "FREEZE_LEDGER_PREVENT_DOUBLE_DEBIT"
-          }
+      def recover_after_timeout(http, order_id, resend_same_request, checks=3):
+          for attempt in range(checks):
+              resp = http.get(f"/api/v1/settlement/status/{order_id}")
+              if resp.status_code == 200:
+                  return {"status": "RECOVERED", "order": resp.json()}   # e.g. UDIR TCC102: credited after timeout
+              time.sleep(0.2 * (attempt + 1))
+          # 404 = the order never reached the bank, so resending the same signed body and key is safe
+          return {"status": "RETRIED", "order": resend_same_request()}
 
 # Directed Graph Edges
 edges:
