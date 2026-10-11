@@ -60,8 +60,7 @@ def _fresh_metrics() -> Dict[str, Any]:
         "liquidity_simulations_count": 0,
         "loan_defaults_prevented_count": 0,
         "total_settled_amount": 0.0,
-        "pii_leakage_detected": 0,
-        "math_hallucinations_detected": 0,
+        "pii_leakage_detected": 0,  # PII that reached the backend unredacted
         "latency_records_ms": []
     }
 
@@ -511,6 +510,9 @@ async def parse_supplier_bill(req: ParseBillRequest):
     import re
     cleaned_text = re.sub(r'\b\d{9,18}\b', '[REDACTED_ACC]', raw_text)
     cleaned_text = re.sub(r'[A-Z]{5}[0-9]{4}[A-Z]{1}', '[REDACTED_PAN]', cleaned_text)
+    if cleaned_text != raw_text:
+        # The agent should have redacted this before sending it; count it as a leak
+        OBSERVABILITY_METRICS["pii_leakage_detected"] += 1
 
     # Extract vendor and amount
     extracted_amount = 4500.00
@@ -549,8 +551,9 @@ async def get_merchant_notifications(merchant_id: str):
 
 @app.get("/api/v1/observability/metrics")
 async def get_observability_metrics():
-    latencies = OBSERVABILITY_METRICS["latency_records_ms"]
+    latencies = sorted(OBSERVABILITY_METRICS["latency_records_ms"])
     avg_latency = (sum(latencies) / len(latencies)) if latencies else 0.0
+    p95_latency = latencies[min(len(latencies) - 1, int(0.95 * len(latencies)))] if latencies else 0.0
 
     return {
         "platform": "Phinite Enterprise Agentic OS",
@@ -564,9 +567,9 @@ async def get_observability_metrics():
             "loan_emi_defaults_prevented": OBSERVABILITY_METRICS["loan_defaults_prevented_count"],
             "total_capital_settled_inr": OBSERVABILITY_METRICS["total_settled_amount"],
             "avg_spoof_guard_latency_ms": round(avg_latency, 2),
-            "latency_sla_compliance": "<600ms (PASSED)" if avg_latency <= 600 else "EXCEEDED",
-            "pii_leakage_events": OBSERVABILITY_METRICS["pii_leakage_detected"],
-            "math_calculation_hallucinations": OBSERVABILITY_METRICS["math_hallucinations_detected"]
+            "p95_spoof_guard_latency_ms": p95_latency,
+            "latency_sla_compliance": "NO DATA" if not latencies else ("p95 <= 600ms (PASSED)" if p95_latency <= 600 else "EXCEEDED"),
+            "pii_leakage_events": OBSERVABILITY_METRICS["pii_leakage_detected"]
         }
     }
 
