@@ -6,8 +6,9 @@ and executes cryptographically signed Paytm settlement actions.
 
 import asyncio
 import uuid
+from datetime import datetime, timezone
 import httpx
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import config
 from agents.spoof_guard import SpoofGuardAgent
@@ -25,6 +26,35 @@ class MasterSupervisorAgent:
         self.spoof_guard = SpoofGuardAgent(backend_url, transport)
         self.supplier_ledger = SupplierLedgerAgent(backend_url, transport)
         self.liquidity_engine = LiquidityEngineAgent(backend_url, transport)
+
+        # Session state: what happened, in order, for the merchant and for auditors
+        self.audit_trail: List[Dict[str, Any]] = []
+
+    async def handle_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Single entry point for incoming events. Routes each one to the right worker(s):
+        - payment_claim  -> Spoof Guard
+        - supplier_bill  -> Supplier Ledger, then Liquidity Engine (EMI-safe plan)
+        - settlement_tap -> signed, idempotent settlement of an approved plan
+        """
+        kind = event.get("type")
+        merchant_id = event.get("merchant_id", config.DEMO_MERCHANT_ID)
+        if kind == "payment_claim":
+            result = await self.handle_soundbox_event(event["txn_id"], event["device_imei"], event.get("claimed_amount"))
+            summary = result["status"]
+        elif kind == "supplier_bill":
+            bill = await self.handle_incoming_bill(event["raw_message"], event.get("vendor_id", "supplier"))
+            plan = await self.optimize_cashflow(bill["due_amount"], bill.get("cutoff_time"), merchant_id, bill["vendor_id"])
+            result = {"bill": bill, "plan": plan}
+            summary = f"{plan['decision']} for bill of {bill['due_amount']:.2f}"
+        elif kind == "settlement_tap":
+            result = await self.execute_settlement(merchant_id, event["amount"], event.get("routing_rail", "IMPS"),
+                                                   event.get("order_id"), event.get("simulate_504", False))
+            summary = f"settled {result['request']['body']['amount']} ({result['request']['body']['orderId']})"
+        else:
+            raise ValueError(f"Unknown event type: {kind!r}")
+        self.audit_trail.append({"at": datetime.now(timezone.utc).isoformat(), "event": kind, "outcome": summary})
+        return result
 
     async def handle_soundbox_event(self, txn_id: str, device_imei: str, claimed_amount: Optional[float] = None) -> Dict[str, Any]:
         """
