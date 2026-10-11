@@ -34,62 +34,78 @@ app.add_middleware(
 # -------------------------------------------------------------
 # IN-MEMORY FINTECH STATE & LEDGER STORE
 # -------------------------------------------------------------
-MERCHANT_DATABASE = {
-    "HelloM8xxxxxxxx45": {
-        "mid": "HelloM8xxxxxxxx45",
-        "merchant_name": "Sharma General Store & Dairy",
-        "secret_key": config.MERCHANT_SIGNING_KEY,
-        "device_imei": "864201938472910",
-        "current_unsettled_balance": 12000.00,
-        "daily_loan_emi": 3000.00,
-        "settled_today": 0.00,
-        "loan_account_id": "PAYTM_LOAN_782194",
-        "bank_account_masked": "XXXXXX9182",
-        "ifsc_masked": "PYTM0123456"
+def _seed_merchants() -> Dict[str, Dict[str, Any]]:
+    return {
+        config.DEMO_MERCHANT_ID: {
+            "mid": config.DEMO_MERCHANT_ID,
+            "merchant_name": "Sharma General Store & Dairy",
+            "secret_key": config.MERCHANT_SIGNING_KEY,
+            "device_imei": "864201938472910",
+            "current_unsettled_balance": 12000.00,
+            "daily_loan_emi": 3000.00,
+            "settled_today": 0.00,
+            "loan_account_id": "PAYTM_LOAN_782194",
+            "bank_account_masked": "XXXXXX9182",
+            "ifsc_masked": "PYTM0123456"
+        }
     }
-}
 
-# Transaction Hash Cache (Legitimate transactions cleared through Gateway Switch)
-KNOWN_GATEWAY_HASHES = {
-    "TXN_9876543210": {
-        "txn_id": "TXN_9876543210",
-        "rrn": "321456987012",
-        "amount": 50.00,
-        "timestamp": int(time.time()),
-        "status": "SUCCESS",
-        "device_imei": "864201938472910",
-        "mqtt_status": "QOS1_PUBACK_DELAYED", # Simulated 2G cellular network congestion
-        "mqtt_publish_sent": True,
-        "puback_received": False
-    },
-    "TXN_1122334455": {
-        "txn_id": "TXN_1122334455",
-        "rrn": "456789123045",
-        "amount": 250.00,
-        "timestamp": int(time.time()),
-        "status": "SUCCESS",
-        "device_imei": "864201938472910",
-        "mqtt_status": "DELIVERED",
-        "mqtt_publish_sent": True,
-        "puback_received": True
+def _seed_gateway_hashes() -> Dict[str, Dict[str, Any]]:
+    # Legitimate transactions cleared through the gateway switch
+    return {
+        "TXN_9876543210": {
+            "txn_id": "TXN_9876543210",
+            "rrn": "321456987012",
+            "amount": 50.00,
+            "timestamp": int(time.time()),
+            "status": "SUCCESS",
+            "device_imei": "864201938472910",
+            "mqtt_status": "QOS1_PUBACK_DELAYED", # Simulated 2G cellular network congestion
+            "mqtt_publish_sent": True,
+            "puback_received": False
+        },
+        "TXN_1122334455": {
+            "txn_id": "TXN_1122334455",
+            "rrn": "456789123045",
+            "amount": 250.00,
+            "timestamp": int(time.time()),
+            "status": "SUCCESS",
+            "device_imei": "864201938472910",
+            "mqtt_status": "DELIVERED",
+            "mqtt_publish_sent": True,
+            "puback_received": True
+        }
     }
-}
 
+def _fresh_metrics() -> Dict[str, Any]:
+    return {
+        "telemetry_verifications_count": 0,
+        "spoofs_detected_count": 0,
+        "lagged_audio_alerts_count": 0,
+        "liquidity_simulations_count": 0,
+        "loan_defaults_prevented_count": 0,
+        "total_settled_amount": 0.0,
+        "pii_leakage_detected": 0,
+        "math_hallucinations_detected": 0,
+        "latency_records_ms": []
+    }
+
+MERCHANT_DATABASE: Dict[str, Dict[str, Any]] = _seed_merchants()
+KNOWN_GATEWAY_HASHES: Dict[str, Dict[str, Any]] = _seed_gateway_hashes()
 P4B_NOTIFICATION_STORE: List[Dict[str, Any]] = []
-SETTLEMENT_ORDERS_STORE: Dict[str, Dict[str, Any]] = []
+SETTLEMENT_ORDERS_STORE: Dict[str, Dict[str, Any]] = {}
 PROCESSED_IDEMPOTENCY_KEYS: Dict[str, Dict[str, Any]] = {}
+OBSERVABILITY_METRICS: Dict[str, Any] = _fresh_metrics()
 
-OBSERVABILITY_METRICS = {
-    "telemetry_verifications_count": 0,
-    "spoofs_detected_count": 0,
-    "lagged_audio_alerts_count": 0,
-    "liquidity_simulations_count": 0,
-    "loan_defaults_prevented_count": 0,
-    "total_settled_amount": 0.0,
-    "pii_leakage_detected": 0,
-    "math_hallucinations_detected": 0,
-    "latency_records_ms": []
-}
+def reset_state() -> None:
+    """Restores the seeded sandbox state in place (used by tests and the demo)."""
+    for store, fresh in ((MERCHANT_DATABASE, _seed_merchants()), (KNOWN_GATEWAY_HASHES, _seed_gateway_hashes()),
+                         (OBSERVABILITY_METRICS, _fresh_metrics())):
+        store.clear()
+        store.update(fresh)
+    P4B_NOTIFICATION_STORE.clear()
+    SETTLEMENT_ORDERS_STORE.clear()
+    PROCESSED_IDEMPOTENCY_KEYS.clear()
 
 # -------------------------------------------------------------
 # DATA MODELS
